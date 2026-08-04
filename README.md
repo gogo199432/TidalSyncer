@@ -90,9 +90,15 @@ docker compose run --rm -e DRY_RUN=true listenbrainz-tidal-sync sync
 Then start it for real:
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 docker compose logs -f
 ```
+
+Compose pulls a prebuilt image from this repo's container registry
+(`ghcr.io/gogo199432/tidalsyncer:latest`), so there is nothing to compile locally.
+`docker compose pull && docker compose up -d` picks up a newer build. To run your own
+changes instead, uncomment `build: .` in [`docker-compose.yml`](docker-compose.yml) and use
+`docker compose up -d --build`.
 
 `daemon` syncs once on startup, then on `SYNC_SCHEDULE` (default every 6 hours). State and
 credentials live in the `sync-data` volume at `/data`.
@@ -299,6 +305,23 @@ other setting is documented inline in [`docker-compose.yml`](docker-compose.yml)
 | `CONTACT_EMAIL` | — | Sent in the ListenBrainz `User-Agent`, as their guidelines ask |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `DRY_RUN` | `false` | Resolve and report, never write to TIDAL |
+
+### The container image
+
+`ghcr.io/gogo199432/tidalsyncer` is built for `linux/amd64` and `linux/arm64` by
+[`.github/workflows/publish-image.yml`](.github/workflows/publish-image.yml) on every push
+to `main`. Pull requests build the image but do not publish it.
+
+| Tag | Points at |
+| --- | --- |
+| `latest` | The newest `main` build (also moved by a release tag) |
+| `edge`, `main` | The newest `main` build |
+| `1.2.3`, `1.2`, `1` | The `v1.2.3` release tag |
+| `sha-<commit>` | One exact commit — useful for pinning or rolling back |
+
+The package is private until you make it public: on the repository's **Packages** page,
+open the package → **Package settings** → **Change visibility**. Otherwise pulling needs
+`docker login ghcr.io` with a PAT that has `read:packages`.
 
 ### Running outside Docker
 

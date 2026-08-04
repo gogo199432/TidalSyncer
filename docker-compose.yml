@@ -7,8 +7,11 @@
 
 services:
   listenbrainz-tidal-sync:
-    build: .
-    image: listenbrainz-tidal-sync:latest
+    # Published by .github/workflows/publish-image.yml on every push to main.
+    # Pin to a release (:1.2.3) instead of :latest if you would rather update deliberately.
+    # To build from source instead, uncomment `build: .` — it takes precedence over the pull.
+    image: ghcr.io/gogo199432/tidalsyncer:latest
+    # build: .
     container_name: listenbrainz-tidal-sync
     restart: unless-stopped
 

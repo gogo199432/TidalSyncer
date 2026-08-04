@@ -1,0 +1,17 @@
+# The Dockerfile copies only package.json, bun.lock, tsconfig.json and src/.
+# Everything else just slows the build context down — or should never be in an image.
+node_modules
+.git
+.github
+data
+out
+dist
+coverage
+
+# Credentials: the container reads its configuration from the environment.
+.env
+.env.*
+!.env.example
+
+docker-compose.yml
+README.md
