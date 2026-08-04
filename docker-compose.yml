@@ -1,0 +1,99 @@
+# Safe to publish: this file contains no credentials.
+#
+# Secrets and personal values are read from .env (gitignored) — copy .env.example to .env
+# and fill it in. Everything that is not secret is configured inline below, so .env stays
+# short. Required values use ${VAR:?...}, which makes Compose fail with a clear message
+# rather than starting a half-configured container.
+
+services:
+  listenbrainz-tidal-sync:
+    build: .
+    image: listenbrainz-tidal-sync:latest
+    container_name: listenbrainz-tidal-sync
+    restart: unless-stopped
+
+    # `daemon` syncs once on startup, then on SYNC_SCHEDULE.
+    command: ["daemon"]
+
+    ports:
+      # Only used by the one-time `login`, which catches the OAuth redirect here.
+      # Must match the port in TIDAL_REDIRECT_URI.
+      - "8080:8080"
+      # The daemon's status dashboard. It can start a sync and has no login, so publish it
+      # only on a network you trust — "127.0.0.1:8081:8081" keeps it on this host.
+      - "8081:8081"
+
+    volumes:
+      - sync-data:/data
+
+    environment:
+      # ---- from .env -------------------------------------------------------
+      LISTENBRAINZ_USER: ${LISTENBRAINZ_USER:?set LISTENBRAINZ_USER in .env}
+      # Only needed when SYNC_FAVORITES is on; empty otherwise.
+      LISTENBRAINZ_TOKEN: ${LISTENBRAINZ_TOKEN:-}
+      TIDAL_CLIENT_ID: ${TIDAL_CLIENT_ID:?set TIDAL_CLIENT_ID in .env}
+      TIDAL_CLIENT_SECRET: ${TIDAL_CLIENT_SECRET:?set TIDAL_CLIENT_SECRET in .env}
+
+      # ISO 3166-1 alpha-2. Affects catalogue availability; set to your account's country.
+      TIDAL_COUNTRY_CODE: ${TIDAL_COUNTRY_CODE:-US}
+
+      # Used for the cron schedule below and for log timestamps.
+      TZ: ${TZ:-UTC}
+
+      # Sent in the User-Agent to ListenBrainz, as their API guidelines ask for.
+      CONTACT_EMAIL: ${CONTACT_EMAIL:-listenbrainz-tidal-sync@localhost}
+
+      # Drop tracks already in your TIDAL collection, per playlist family; "*" for all,
+      # empty to disable. Enabling this adds the collection.read scope, so you must run
+      # `login` once more afterwards.
+      #
+      # Weekly Jams is *designed* to be music you already know, so filtering it can empty
+      # it out; weekly-exploration is usually the one worth filtering.
+      TIDAL_SKIP_COLLECTION_FOR: ${TIDAL_SKIP_COLLECTION_FOR:-}
+
+      # ---- inline configuration -------------------------------------------
+      # Mirror your TIDAL collection back to ListenBrainz as loved recordings, after the
+      # playlists are done. Needs LISTENBRAINZ_TOKEN in .env, and adds the collection.read
+      # scope, so run `login` once more after switching it on.
+      #
+      # Additive only: un-favouriting on TIDAL never removes a ListenBrainz love.
+      SYNC_FAVORITES: "true"
+      # The playlists ListenBrainz keeps regenerating. This is also the built-in default.
+      # Set to "*" to mirror every family instead, including the one-off year-in-review
+      # lists (top-discoveries-of-2019, lb-radio, ...).
+      LISTENBRAINZ_SOURCE_PATCHES: weekly-jams,weekly-exploration,daily-jams
+
+      # Must be registered VERBATIM as a redirect URI on your app at developer.tidal.com,
+      # and the port must match the `ports:` mapping above.
+      TIDAL_REDIRECT_URI: http://localhost:8080/callback
+
+      # PRIVATE (shows as "unlisted" in the TIDAL API) or PUBLIC.
+      TIDAL_PLAYLIST_ACCESS: PRIVATE
+
+      # {title} is the humanised family name, e.g. "Weekly Jams".
+      TIDAL_PLAYLIST_NAME_TEMPLATE: "{title} (ListenBrainz)"
+
+      # Credentials, sync state and the ISRC cache. Backed by the sync-data volume.
+      DATA_DIR: /data
+
+      # Cron expression for the daemon. Daily Jams refreshes daily, the weekly lists on
+      # Mondays, so every 6 hours picks up a new edition promptly without being wasteful.
+      SYNC_SCHEDULE: 0 */6 * * *
+
+      # Status dashboard served by the daemon: sync stats, the next scheduled run and a
+      # button that starts one now. Set DASHBOARD_ENABLED to false to serve nothing at all.
+      DASHBOARD_ENABLED: "true"
+      DASHBOARD_PORT: 8081
+
+      # debug | info | warn | error
+      LOG_LEVEL: info
+
+      # Resolve and report everything, but never write to TIDAL. Useful for a first run.
+      DRY_RUN: "false"
+
+volumes:
+  # Pinned to a fixed name on purpose. Compose otherwise prefixes the volume with the
+  # directory name, so moving or renaming this folder would silently hand the container a
+  # brand-new empty volume — losing the stored TIDAL credentials and forcing a re-login.
+  sync-data:
+    name: listenbrainz-tidal-sync-data

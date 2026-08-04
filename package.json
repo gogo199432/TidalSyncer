@@ -1,0 +1,26 @@
+{
+  "name": "listenbrainz-tidal-sync",
+  "version": "1.0.0",
+  "description": "Mirrors ListenBrainz \"Created for you\" playlists into TIDAL playlists, keeping them up to date automatically.",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "login": "bun run src/index.ts login",
+    "sync": "bun run src/index.ts sync",
+    "favorites": "bun run src/index.ts favorites",
+    "status": "bun run src/index.ts status",
+    "daemon": "bun run src/index.ts daemon",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@tidal-music/api": "^0.39.1",
+    "@tidal-music/auth": "^1.6.1",
+    "croner": "^10.0.1"
+  }
+}

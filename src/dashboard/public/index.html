@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en" data-state="loading">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>TidalSyncer</title>
+    <link rel="stylesheet" href="/dashboard.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>◍</text></svg>"
+    />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+
+    <header class="masthead">
+      <div class="mark">
+        <span class="mark-glyph" aria-hidden="true">◍</span>
+        <span class="mark-name">Tidal<em>Syncer</em></span>
+      </div>
+      <div class="masthead-meta">
+        <span class="pill pill-dry" id="dry-run-pill" hidden>Dry run</span>
+        <span class="who" id="who">&nbsp;</span>
+        <span class="beacon" id="beacon" title="Connection to the daemon"></span>
+      </div>
+    </header>
+
+    <!-- The one moving part: a slow tide that quickens while a sync is running. -->
+    <div class="tide" aria-hidden="true">
+      <svg viewBox="0 0 480 24" preserveAspectRatio="none">
+        <path
+          d="M0 12 C 20 2, 40 2, 60 12 S 100 22, 120 12 S 160 2, 180 12 S 220 22, 240 12 S 280 2, 300 12 S 340 22, 360 12 S 400 2, 420 12 S 460 22, 480 12"
+        />
+      </svg>
+    </div>
+
+    <main>
+      <section class="hero" aria-labelledby="next-label">
+        <div class="hero-next">
+          <p class="label" id="next-label">Next sync</p>
+          <p class="countdown" id="countdown">--:--:--</p>
+          <p class="hero-sub" id="next-detail">Waiting for the daemon…</p>
+        </div>
+
+        <div class="hero-action">
+          <button type="button" id="run-now" class="run-button">
+            <span class="run-button-label">Sync now</span>
+            <span class="run-button-spinner" aria-hidden="true"></span>
+          </button>
+          <p class="hero-sub" id="run-state" role="status" aria-live="polite">Idle</p>
+        </div>
+      </section>
+
+      <section class="tiles" aria-label="Totals">
+        <article class="tile">
+          <p class="label">Playlists</p>
+          <p class="tile-value" id="stat-families">–</p>
+          <p class="tile-note" id="stat-families-note">mirrored families</p>
+        </article>
+        <article class="tile">
+          <p class="label">Tracks</p>
+          <p class="tile-value" id="stat-tracks">–</p>
+          <p class="tile-note" id="stat-tracks-note">now on TIDAL</p>
+        </article>
+        <article class="tile">
+          <p class="label">Unmatched</p>
+          <p class="tile-value" id="stat-unmatched">–</p>
+          <p class="tile-note" id="stat-unmatched-note">not found on TIDAL</p>
+        </article>
+        <article class="tile">
+          <p class="label">Last run</p>
+          <p class="tile-value" id="stat-last">–</p>
+          <p class="tile-note" id="stat-last-note">never</p>
+        </article>
+      </section>
+
+      <section class="panel" aria-labelledby="playlists-heading">
+        <div class="panel-head">
+          <h2 id="playlists-heading">Playlists</h2>
+          <p class="panel-note">ListenBrainz → TIDAL</p>
+        </div>
+        <div class="cards" id="playlists"></div>
+      </section>
+
+      <section class="panel" id="favorites-panel" aria-labelledby="favorites-heading" hidden>
+        <div class="panel-head">
+          <h2 id="favorites-heading">Favourites</h2>
+          <p class="panel-note">TIDAL collection → ListenBrainz loves</p>
+        </div>
+        <div class="readout" id="favorites"></div>
+        <div id="unresolved"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="history-heading">
+        <div class="panel-head">
+          <h2 id="history-heading">Recent runs</h2>
+          <p class="panel-note" id="history-note">newest on the right</p>
+        </div>
+        <div class="history" id="history">
+          <div class="history-bars" id="history-bars"></div>
+          <div class="history-legend">
+            <span><i class="dot dot-good"></i>clean</span>
+            <span><i class="dot dot-warn"></i>skipped</span>
+            <span><i class="dot dot-bad"></i>failed</span>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="colophon">
+      <span id="schedule-line">–</span>
+      <span id="updated-line">–</span>
+    </footer>
+
+    <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+
+    <script src="/dashboard.js" type="module"></script>
+  </body>
+</html>
