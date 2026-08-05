@@ -40,10 +40,15 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # ffmpeg is preinstalled on the GitHub runners; the demux test skips itself without
-      # it, so assert it is really there rather than silently losing the coverage.
-      - name: Check ffmpeg is available
-        run: ffmpeg -version && ffprobe -version
+      # The runner images do not carry ffmpeg. The demux test skips itself without it, so
+      # install it rather than let that coverage disappear quietly — it is the test for the
+      # one bug that has actually reached production here.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
 
       - name: Typecheck
         run: bunx tsc --noEmit
