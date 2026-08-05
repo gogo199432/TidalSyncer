@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { EncryptedStreamError, parsePlaylist } from "./download.ts";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { demuxFlac, EncryptedStreamError, parsePlaylist } from "./download.ts";
 
 const BASE = "https://sp-ad-cf.audio.tidal.com/manifests/abc/playlist.m3u8";
 
@@ -77,5 +81,43 @@ describe("parsePlaylist", () => {
     const playlist = "#EXTM3U\r\n\r\n#EXTINF:10.0,\r\nsegment-0.mp4\r\n";
 
     expect(parsePlaylist(playlist, BASE).segmentUris).toHaveLength(1);
+  });
+});
+
+/**
+ * Runs the real ffmpeg, because the failure this guards against is entirely ffmpeg's:
+ * the output path is a temporary `.part`, and without an explicit `-f flac` ffmpeg cannot
+ * infer a format from that extension and refuses every track.
+ *
+ * Skipped where ffmpeg is absent — the same condition under which `download` refuses to run.
+ */
+const hasFfmpeg = Boolean(Bun.which("ffmpeg") && Bun.which("ffprobe"));
+
+describe.if(hasFfmpeg)("demuxFlac", () => {
+  test("writes a FLAC stream to an output path with no usable extension", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "demux-"));
+    const source = join(directory, "source.m4a");
+    // The shape TIDAL serves: a FLAC stream inside an MP4 container.
+    const built = spawnSync("ffmpeg", [
+      "-y", "-hide_banner", "-loglevel", "error",
+      "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+      "-c:a", "flac", "-f", "mp4", source,
+    ]);
+    expect(built.status).toBe(0);
+
+    // Exactly what runDownload passes: `<final>.<pid>.part`, deliberately not `.flac`.
+    const output = join(directory, "track.flac.999.part");
+    await demuxFlac(source, output);
+
+    expect((await stat(output)).size).toBeGreaterThan(0);
+
+    // Not just "a file appeared" — ffmpeg must agree it is FLAC.
+    const probe = spawnSync("ffprobe", [
+      "-v", "error", "-select_streams", "a:0",
+      "-show_entries", "stream=codec_name", "-of", "csv=p=0", output,
+    ]);
+    expect(probe.stdout.toString().trim()).toBe("flac");
+
+    await rm(directory, { recursive: true, force: true });
   });
 });

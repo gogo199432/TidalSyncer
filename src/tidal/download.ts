@@ -254,15 +254,20 @@ async function writeSegments(playlist: ParsedPlaylist, path: string): Promise<nu
  * Lifts the FLAC stream out of the MP4 container without re-encoding.
  *
  * `-c copy` is what keeps this lossless: the bytes are moved, not decoded and re-compressed.
+ *
+ * `-f flac` is not optional. ffmpeg picks the output format from the filename's extension,
+ * and `output` is a temporary `.part` — deliberately not `.flac`, so a scanner watching the
+ * library cannot pick it up mid-write. Without the explicit format that is an immediate
+ * "Unable to choose an output format" and every single track fails.
  */
-async function demuxFlac(input: string, output: string): Promise<void> {
+export async function demuxFlac(input: string, output: string): Promise<void> {
   const ffmpeg = Bun.which("ffmpeg");
   if (!ffmpeg) throw new DownloadError("ffmpeg is required to demux FLAC from the MP4 container, but is not on PATH.");
 
   const code = await new Promise<number>((resolve, reject) => {
     const child = spawn(
       ffmpeg,
-      ["-y", "-hide_banner", "-loglevel", "error", "-i", input, "-map", "0:a:0", "-c", "copy", output],
+      ["-y", "-hide_banner", "-loglevel", "error", "-i", input, "-map", "0:a:0", "-c", "copy", "-f", "flac", output],
       { stdio: ["ignore", "ignore", "pipe"] },
     );
 

@@ -62,6 +62,15 @@ export type DownloadOptions = {
 const TIER_ORDER: MatchTier[] = ["exact", "album-agnostic", "loose"];
 
 /**
+ * Consecutive failures that mean the run itself is broken rather than the tracks being odd.
+ *
+ * A missing codec, a wrong ffmpeg invocation or a share that went read-only fails *every*
+ * track identically, and at three seconds apiece a long list spends half an hour proving it.
+ * Individual tracks do genuinely fail, so this is not one strike — but it is not 695 either.
+ */
+const CONSECUTIVE_FAILURE_LIMIT = 5;
+
+/**
  * Fills a local library from the snapshot `export` produced.
  *
  * The export is the input on purpose rather than reading TIDAL again: it already resolved
@@ -92,6 +101,7 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
   // this tool did not write, whose names will not be the ones it would have chosen.
   const library = await LibraryIndex.build(config.libraryDir);
   const allowedTiers = new Set(TIER_ORDER.slice(0, TIER_ORDER.indexOf(options.skipTier) + 1));
+  let consecutiveFailures = 0;
 
   log.info("Starting download", {
     tracks: selected.length,
@@ -144,16 +154,24 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
       const written = await downloadTrack(session!, track.tidalId, destination, options.quality);
       if (written) report.downloaded += 1;
       else report.unavailable += 1;
+      consecutiveFailures = 0;
     } catch (error) {
       // An encrypted playlist means the whole approach stopped working, not that one track
       // is odd — carrying on would just produce hundreds of identical failures.
       if (error instanceof EncryptedStreamError) throw error;
 
       report.failed += 1;
-      log.warn("Track failed", {
-        track: label(track),
-        error: error instanceof DownloadError ? error.message : String(error),
-      });
+      consecutiveFailures += 1;
+      const message = error instanceof DownloadError ? error.message : String(error);
+      log.warn("Track failed", { track: label(track), error: message });
+
+      if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
+        throw new DownloadError(
+          `${consecutiveFailures} tracks in a row failed, so this is the run and not the ` +
+            `tracks — stopping instead of working through ${selected.length - index - 1} more. ` +
+            `Last error: ${message}`,
+        );
+      }
     }
 
     await sleep(config.tidal.downloadDelayMs, options.signal);
