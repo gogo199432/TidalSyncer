@@ -134,6 +134,9 @@ function render(status) {
   repaint("playlists", status.playlists, renderPlaylists);
   repaint("favorites", status.favorites, renderFavorites);
   repaint("runs", status.runs, renderHistory);
+  // Not behind `repaint`: the progress line moves every poll while a download runs, and the
+  // guard's minute-bucket signature would hold it still for up to a minute.
+  renderBackup(status.backup);
 
   $("schedule-line").textContent = `${status.schedule.cron} · ${status.schedule.timezone}`;
   $("updated-line").textContent = `updated ${new Date().toLocaleTimeString(LOCALE)}`;
@@ -359,6 +362,325 @@ function describeRun(run) {
   return lines.join("\n");
 }
 
+/* ---------- backup ---------- */
+
+/** Set once, then left alone — repainting a field the user is editing would fight them. */
+let backupDefaultsApplied = false;
+/** Rebuild the source list only when the export actually changed. */
+let playlistSignature = "";
+
+function chip(id, tone, label) {
+  const node = $(id);
+  node.className = `chip chip-${tone}`;
+  node.textContent = label;
+}
+
+function readout(id, entries) {
+  const node = $(id);
+  node.hidden = entries.length === 0;
+  node.replaceChildren();
+
+  for (const [label, value, note] of entries) {
+    const block = el("div");
+    block.append(el("p", "label", label), el("p", "readout-value", String(value)));
+    if (note) block.append(el("p", "tile-note", note));
+    node.append(block);
+  }
+}
+
+function renderBackup(backup) {
+  if (!backup) return;
+  renderAuthStep(backup);
+  renderExportStep(backup);
+  renderDownloadStep(backup);
+}
+
+function renderAuthStep(backup) {
+  const { state, verificationUri, userCode, expiresAt, error } = backup.auth;
+  const step = $("step-auth");
+  const button = $("auth-button");
+  const label = button.querySelector(".run-button-label");
+
+  step.classList.toggle("is-done", state === "authorised");
+  step.classList.remove("is-waiting");
+  $("device").hidden = state !== "pending";
+
+  if (state === "pending") {
+    $("device-link").href = verificationUri;
+    $("device-link").textContent = verificationUri;
+    $("device-code").textContent = userCode;
+    const remaining = new Date(expiresAt).getTime() - serverNow();
+    $("device-expiry").textContent =
+      remaining > 0 ? `Code expires in ${clock(remaining)}` : "Code expired — start again.";
+  }
+
+  const view = {
+    unconfigured: {
+      tone: "idle",
+      chip: "off",
+      note:
+        "TIDAL_DEVICE_CLIENT_ID is not set, so downloading is switched off. The developer-portal " +
+        "client used for syncing cannot do this — see .env.example.",
+      button: "Authorise",
+      disabled: true,
+    },
+    "signed-out": {
+      tone: "idle",
+      chip: "signed out",
+      note: "Authorising opens a code you approve on tidal.com. It is separate from the sync login.",
+      button: "Authorise",
+      disabled: false,
+    },
+    pending: {
+      tone: "warn",
+      chip: "waiting",
+      note: "Waiting for you to approve the device…",
+      button: "Waiting",
+      disabled: true,
+    },
+    authorised: {
+      tone: "good",
+      chip: "authorised",
+      note: "A playback session is stored. It refreshes itself; re-authorise only if it stops working.",
+      button: "Re-authorise",
+      disabled: false,
+    },
+    failed: {
+      tone: "bad",
+      chip: "failed",
+      note: error ?? "Authorisation failed.",
+      button: "Try again",
+      disabled: false,
+    },
+  }[state];
+
+  chip("auth-chip", view.tone, view.chip);
+  $("auth-note").textContent = view.note;
+  label.textContent = view.button;
+  button.disabled = view.disabled;
+}
+
+function renderExportStep(backup) {
+  const running = backup.running === "export";
+  const { summary, lastRunAt, error } = backup.export;
+  const step = $("step-export");
+
+  step.classList.toggle("is-done", Boolean(summary) && !error);
+  $("export-button").disabled = Boolean(backup.running);
+  $("export-button").querySelector(".run-button-label").textContent = running ? "Exporting" : "Export now";
+
+  if (running) {
+    chip("export-chip", "warn", "running");
+    $("export-note").textContent = "Reading playlists, the collection and every track's metadata…";
+  } else if (error) {
+    chip("export-chip", "bad", "failed");
+    $("export-note").textContent = error;
+  } else if (summary) {
+    chip("export-chip", "good", "ready");
+    $("export-note").textContent = `Snapshot taken ${ago(summary.exportedAt)}. Re-run it whenever your playlists change.`;
+  } else {
+    chip("export-chip", "idle", "never run");
+    $("export-note").textContent =
+      "Playlists, the collection and every ISRC — written to DATA_DIR/export. Downloading reads this.";
+  }
+
+  if (lastRunAt && !summary && !error) $("export-note").textContent = "Export produced nothing.";
+
+  readout(
+    "export-readout",
+    summary
+      ? [
+          ["Playlists", summary.stats.playlists],
+          ["Favourites", summary.stats.favorites, "tracks"],
+          ["Unique", summary.stats.uniqueTracks, "tracks"],
+          ["With ISRC", summary.stats.withIsrc, "re-resolvable"],
+          ["Unresolved", summary.stats.unresolved, "tombstoned"],
+        ]
+      : [],
+  );
+}
+
+function renderDownloadStep(backup) {
+  const { summary } = backup.export;
+  const { progress, report, request, error } = backup.download;
+  const running = backup.running === "download";
+  const step = $("step-download");
+
+  applyDownloadDefaults(backup);
+  syncPlaylistOptions(summary);
+
+  // Everything downstream needs the export, dry runs included — the run is driven from it.
+  const blocked = !summary
+    ? "Run the export first — the download works from that snapshot, not from TIDAL directly."
+    : !backup.ffmpeg
+      ? "ffmpeg is not on PATH. FLAC arrives inside an MP4 container and cannot be unwrapped without it; the AAC tiers still work."
+      : null;
+
+  step.classList.toggle("is-waiting", !summary);
+  for (const id of ["field-playlist", "field-quality", "field-skip-tier", "field-limit", "field-dry-run"]) {
+    $(id).disabled = running;
+  }
+
+  const dryRun = $("field-dry-run").checked;
+  const needsAuth = !dryRun && backup.auth.state !== "authorised";
+
+  const button = $("download-button");
+  button.disabled = running || Boolean(backup.running) || !summary || needsAuth;
+  button.querySelector(".run-button-label").textContent = running ? "Downloading" : "Start download";
+  button.querySelector(".run-button-spinner").classList.toggle("is-spinning", running);
+
+  const stop = $("stop-button");
+  stop.hidden = !running;
+  stop.disabled = backup.stopping;
+  stop.querySelector(".run-button-label").textContent = backup.stopping ? "Stopping" : "Stop";
+
+  $("download-progress").hidden = !running || !progress;
+  if (running && progress) {
+    $("progress-fill").style.width = `${Math.round((progress.index / progress.total) * 100)}%`;
+    $("progress-line").textContent = `${progress.index} / ${progress.total} · ${progress.track}`;
+  }
+
+  if (running) {
+    chip("download-chip", "warn", request?.dryRun ? "dry run" : "running");
+    $("download-note").textContent = `Writing to ${backup.libraryDir} · ${backup.defaults.delayMs}ms between tracks`;
+  } else if (error) {
+    chip("download-chip", "bad", "failed");
+    $("download-note").textContent = error;
+  } else if (needsAuth) {
+    chip("download-chip", "idle", "needs a session");
+    $("download-note").textContent = "Authorise a playback session above, or tick dry run to see the plan first.";
+  } else if (blocked) {
+    chip("download-chip", "idle", summary ? "no ffmpeg" : "needs an export");
+    $("download-note").textContent = blocked;
+  } else if (report) {
+    chip("download-chip", report.failed > 0 ? "bad" : report.stopped ? "warn" : "good", report.stopped ? "stopped" : "done");
+    $("download-note").textContent = describeReport(report, request, backup);
+  } else {
+    chip("download-chip", "idle", "idle");
+    $("download-note").textContent = `Writing to ${backup.libraryDir}. A dry run contacts nothing.`;
+  }
+
+  readout(
+    "download-readout",
+    report
+      ? [
+          ["Downloaded", report.downloaded],
+          ["Skipped", report.skipped, "already on disk"],
+          ["Unavailable", report.unavailable, "preview only"],
+          ["Failed", report.failed],
+          ["Total", report.total, "considered"],
+        ]
+      : [],
+  );
+}
+
+function describeReport(report, request, backup) {
+  const parts = [];
+  if (request?.dryRun) parts.push("Dry run — nothing was written.");
+  if (report.stopped) parts.push("Stopped before the end of the list.");
+
+  const tiers = report.skippedByTier;
+  if (tiers && report.skipped > 0) {
+    parts.push(
+      `Skips matched: ${tiers.exact} exact, ${tiers["album-agnostic"]} album-agnostic, ${tiers.loose} loose.`,
+    );
+  }
+  if (tiers?.loose > 0) {
+    parts.push("Loose matches ignore bracketed suffixes, so a (Live) take can cover a studio one.");
+  }
+  if (report.unavailable > 0) {
+    parts.push(`${plural(report.unavailable, "track")} were preview-only — the account is not entitled to them.`);
+  }
+  if (parts.length === 0) parts.push(`Everything in ${backup.libraryDir} is up to date.`);
+  return parts.join(" ");
+}
+
+/** Seeds the form from the daemon's configured defaults, once, on the first status. */
+function applyDownloadDefaults(backup) {
+  if (backupDefaultsApplied) return;
+  backupDefaultsApplied = true;
+  $("field-quality").value = backup.defaults.quality;
+  $("field-skip-tier").value = backup.defaults.skipTier;
+}
+
+function syncPlaylistOptions(summary) {
+  const names = summary ? summary.playlists.map((playlist) => playlist.name) : [];
+  const signature = names.join(" ");
+  if (signature === playlistSignature) return;
+  playlistSignature = signature;
+
+  const select = $("field-playlist");
+  const chosen = select.value;
+  select.replaceChildren();
+
+  const collection = el("option", null, "Collection (favourites)");
+  collection.value = "";
+  select.append(collection);
+
+  for (const playlist of summary?.playlists ?? []) {
+    const option = el("option", null, `${playlist.name} — ${plural(playlist.trackCount, "track")}`);
+    option.value = playlist.name;
+    select.append(option);
+  }
+
+  // Keep the user's choice across a re-export that still has that playlist.
+  if (names.includes(chosen)) select.value = chosen;
+}
+
+async function post(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error ?? payload.reason ?? `status ${response.status}`);
+  return payload;
+}
+
+/** Reports a failed action in the step's own note, rather than a dialog or a silent no-op. */
+async function action(noteId, run) {
+  try {
+    await run();
+  } catch (error) {
+    $(noteId).textContent = error.message;
+  }
+  setTimeout(refresh, 250);
+}
+
+$("auth-button").addEventListener("click", () => {
+  $("auth-button").disabled = true;
+  void action("auth-note", () => post("/api/backup/login"));
+});
+
+$("export-button").addEventListener("click", () => {
+  $("export-button").disabled = true;
+  void action("export-note", () => post("/api/backup/export"));
+});
+
+$("download-button").addEventListener("click", () => {
+  $("download-button").disabled = true;
+  void action("download-note", () =>
+    post("/api/backup/download", {
+      playlist: $("field-playlist").value || undefined,
+      quality: $("field-quality").value,
+      skipTier: $("field-skip-tier").value,
+      limit: $("field-limit").value || undefined,
+      dryRun: $("field-dry-run").checked,
+    }),
+  );
+});
+
+$("stop-button").addEventListener("click", () => {
+  $("stop-button").disabled = true;
+  void action("download-note", () => post("/api/backup/stop"));
+});
+
+// The button's enabled state depends on this, and waiting for the next poll to reflect a
+// click of the checkbox feels broken.
+$("field-dry-run").addEventListener("change", () => void refresh());
+
 /* ---------- tooltip ---------- */
 
 const tooltip = $("tooltip");
@@ -390,7 +712,12 @@ async function refresh() {
     const status = await response.json();
     clockOffsetMs = new Date(status.now).getTime() - Date.now();
     render(status);
-    pollTimer = setTimeout(refresh, status.running ? RUNNING_POLL_MS : IDLE_POLL_MS);
+
+    // A download moves a track at a time and a pending device code expires in minutes, so
+    // either one earns the fast poll just as much as a running sync does.
+    const busy =
+      status.running || Boolean(status.backup?.running) || status.backup?.auth.state === "pending";
+    pollTimer = setTimeout(refresh, busy ? RUNNING_POLL_MS : IDLE_POLL_MS);
   } catch (error) {
     root.dataset.state = "offline";
     $("run-state").textContent = `Cannot reach the daemon — ${error.message}`;

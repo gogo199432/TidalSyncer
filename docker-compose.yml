@@ -22,12 +22,16 @@ services:
       # Only used by the one-time `login`, which catches the OAuth redirect here.
       # Must match the port in TIDAL_REDIRECT_URI.
       - "8080:8080"
-      # The daemon's status dashboard. It can start a sync and has no login, so publish it
-      # only on a network you trust — "127.0.0.1:8081:8081" keeps it on this host.
+      # The daemon's status dashboard. It can start a sync, run a backup, and shows the
+      # TIDAL device code while a login is pending — and it has no authentication. Publish
+      # it only on a network you trust; "127.0.0.1:8081:8081" keeps it on this host.
       - "8081:8081"
 
     volumes:
       - sync-data:/data
+      # Audio written by `download`. A bind mount rather than a named volume so the files
+      # land somewhere your music server can already see; `export` does not need this.
+      - ${LIBRARY_DIR:-./library}:/library
 
     environment:
       # ---- from .env -------------------------------------------------------
@@ -54,6 +58,12 @@ services:
       # it out; weekly-exploration is usually the one worth filtering.
       TIDAL_SKIP_COLLECTION_FOR: ${TIDAL_SKIP_COLLECTION_FOR:-}
 
+      # Downloading. Empty (the default) leaves `download` off; `export` is unaffected.
+      # This is NOT the developer-portal client id above — see .env.example for why the
+      # two cannot be the same, and what setting it means.
+      TIDAL_DEVICE_CLIENT_ID: ${TIDAL_DEVICE_CLIENT_ID:-}
+      TIDAL_DEVICE_CLIENT_SECRET: ${TIDAL_DEVICE_CLIENT_SECRET:-}
+
       # ---- inline configuration -------------------------------------------
       # Mirror your TIDAL collection back to ListenBrainz as loved recordings, after the
       # playlists are done. Needs LISTENBRAINZ_TOKEN in .env, and adds the collection.read
@@ -76,15 +86,35 @@ services:
       # {title} is the humanised family name, e.g. "Weekly Jams".
       TIDAL_PLAYLIST_NAME_TEMPLATE: "{title} (ListenBrainz)"
 
-      # Credentials, sync state and the ISRC cache. Backed by the sync-data volume.
+      # Credentials, sync state, the ISRC cache, and the `export` snapshot.
+      # Backed by the sync-data volume.
       DATA_DIR: /data
+
+      # Where `download` writes audio, matching the bind mount above.
+      LIBRARY_DIR: /library
+
+      # Tier `download` asks for first; it walks down when a track is not entitled.
+      # hires | lossless | high | low
+      TIDAL_DOWNLOAD_QUALITY: lossless
+
+      # How closely a file already in LIBRARY_DIR must match before the track is skipped:
+      #   exact           artist, album and title all agree
+      #   album-agnostic  artist and title agree; the album may differ (default)
+      #   loose           also ignores "(Remastered 2011)"-style suffixes
+      # Extension is never part of the comparison, so an existing .mp3 counts as present.
+      TIDAL_SKIP_TIER: album-agnostic
+
+      # Pause between tracks. TIDAL answers a burst on the manifest endpoint with 429s and
+      # eventually a captcha that deauthenticates the session — do not lower this casually.
+      TIDAL_DOWNLOAD_DELAY_MS: "3000"
 
       # Cron expression for the daemon. Daily Jams refreshes daily, the weekly lists on
       # Mondays, so every 6 hours picks up a new edition promptly without being wasteful.
       SYNC_SCHEDULE: 0 */6 * * *
 
-      # Status dashboard served by the daemon: sync stats, the next scheduled run and a
-      # button that starts one now. Set DASHBOARD_ENABLED to false to serve nothing at all.
+      # Status dashboard served by the daemon: sync stats, the next scheduled run, a button
+      # that starts one now, and the whole backup path — device login, export and download,
+      # with live progress. Set DASHBOARD_ENABLED to false to serve nothing at all.
       DASHBOARD_ENABLED: "true"
       DASHBOARD_PORT: 8081
 

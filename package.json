@@ -11,6 +11,9 @@
     "favorites": "bun run src/index.ts favorites",
     "status": "bun run src/index.ts status",
     "daemon": "bun run src/index.ts daemon",
+    "export": "bun run src/index.ts export",
+    "download-login": "bun run src/index.ts download-login",
+    "download": "bun run src/index.ts download",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },

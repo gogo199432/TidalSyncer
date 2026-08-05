@@ -92,6 +92,121 @@
         <div id="unresolved"></div>
       </section>
 
+      <!--
+        The whole backup path, in the order it has to happen: authorise a playback session,
+        snapshot the catalogue, then fetch audio. Each step says why it is not ready yet
+        rather than just being disabled.
+      -->
+      <section class="panel" aria-labelledby="backup-heading">
+        <div class="panel-head">
+          <h2 id="backup-heading">Backup</h2>
+          <p class="panel-note" id="backup-note">TIDAL → local files</p>
+        </div>
+
+        <ol class="steps">
+          <li class="step" id="step-auth">
+            <div class="step-head">
+              <span class="step-index">1</span>
+              <h3 class="step-title">Playback session</h3>
+              <span class="chip chip-idle" id="auth-chip">checking</span>
+            </div>
+            <p class="step-note" id="auth-note">&nbsp;</p>
+
+            <div class="device" id="device" hidden>
+              <p class="label">Open this and approve the device</p>
+              <a class="device-link" id="device-link" target="_blank" rel="noreferrer noopener">link.tidal.com</a>
+              <p class="device-code" id="device-code">–</p>
+              <p class="step-note" id="device-expiry">&nbsp;</p>
+            </div>
+
+            <div class="step-actions">
+              <button type="button" id="auth-button" class="run-button">
+                <span class="run-button-label">Authorise</span>
+              </button>
+            </div>
+          </li>
+
+          <li class="step" id="step-export">
+            <div class="step-head">
+              <span class="step-index">2</span>
+              <h3 class="step-title">Export the catalogue</h3>
+              <span class="chip chip-idle" id="export-chip">never run</span>
+            </div>
+            <p class="step-note" id="export-note">
+              Playlists, the collection and every ISRC — written to DATA_DIR/export.
+            </p>
+            <div class="readout readout-tight" id="export-readout" hidden></div>
+
+            <div class="step-actions">
+              <button type="button" id="export-button" class="run-button">
+                <span class="run-button-label">Export now</span>
+              </button>
+            </div>
+          </li>
+
+          <li class="step" id="step-download">
+            <div class="step-head">
+              <span class="step-index">3</span>
+              <h3 class="step-title">Download audio</h3>
+              <span class="chip chip-idle" id="download-chip">idle</span>
+            </div>
+            <p class="step-note" id="download-note">&nbsp;</p>
+
+            <div class="fields">
+              <label class="field">
+                <span class="label">Source</span>
+                <select id="field-playlist">
+                  <option value="">Collection (favourites)</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="label">Quality</span>
+                <select id="field-quality">
+                  <option value="hires">Hi-Res FLAC</option>
+                  <option value="lossless">Lossless FLAC</option>
+                  <option value="high">High AAC</option>
+                  <option value="low">Low AAC</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="label">Skip what matches</span>
+                <select id="field-skip-tier">
+                  <option value="exact">Artist + album + title</option>
+                  <option value="album-agnostic">Artist + title</option>
+                  <option value="loose">Artist + title, ignoring (Remastered)</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="label">Limit</span>
+                <input id="field-limit" type="number" min="1" step="1" placeholder="all" />
+              </label>
+            </div>
+
+            <label class="toggle">
+              <input id="field-dry-run" type="checkbox" checked />
+              <span>Dry run — list what would be fetched, download nothing</span>
+            </label>
+
+            <div class="progress" id="download-progress" hidden>
+              <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+              <p class="step-note" id="progress-line">&nbsp;</p>
+            </div>
+
+            <div class="readout readout-tight" id="download-readout" hidden></div>
+
+            <div class="step-actions">
+              <button type="button" id="download-button" class="run-button">
+                <span class="run-button-label">Start download</span>
+                <span class="run-button-spinner is-job" aria-hidden="true"></span>
+              </button>
+              <button type="button" id="stop-button" class="run-button run-button-quiet" hidden>
+                <span class="run-button-label">Stop</span>
+              </button>
+            </div>
+          </li>
+        </ol>
+      </section>
+
       <section class="panel" aria-labelledby="history-heading">
         <div class="panel-head">
           <h2 id="history-heading">Recent runs</h2>

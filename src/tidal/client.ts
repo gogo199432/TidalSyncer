@@ -286,13 +286,13 @@ export async function fetchTrackDescriptors(
 }
 
 /** The API returns a relative URL for the next page; we only need the cursor from it. */
-function nextCursor(next: string | undefined): string | undefined {
+export function nextCursor(next: string | undefined): string | undefined {
   if (!next) return undefined;
   const query = next.slice(next.indexOf("?") + 1);
   return new URLSearchParams(query).get("page[cursor]") ?? undefined;
 }
 
-function chunked<T>(items: T[], size: number): T[][] {
+export function chunked<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let index = 0; index < items.length; index += size) {
     chunks.push(items.slice(index, index + size));

@@ -119,15 +119,21 @@ after a restart — only the per-playlist detail (which tracks went unmatched on
 ListenBrainz → TIDAL side, which families were skipped) starts empty until this process has
 run a sync of its own.
 
+It also carries the whole [backup path](#backing-up) — see **Doing it from the browser**
+below — so `export` and `download` never need a terminal.
+
 Two things worth knowing:
 
-- **There is no login.** Anyone who can reach the port can start a sync — not destructive,
-  but not something to expose to the internet. The compose file publishes `8081:8081`;
-  change it to `127.0.0.1:8081:8081` to keep it on the host, or set `DASHBOARD_ENABLED` to
-  `false` to serve nothing at all.
+- **There is no login.** Anyone who can reach the port can start a sync, run a download, or
+  read the device code while one is pending — and approve that code with *their* TIDAL
+  account, leaving the daemon holding a session you did not intend. Not something to expose
+  to the internet. The compose file publishes `8081:8081`; change it to
+  `127.0.0.1:8081:8081` to keep it on the host, or set `DASHBOARD_ENABLED` to `false` to
+  serve nothing at all.
 - **A manual run cannot overlap a scheduled one.** Both go through the same runner, and a
   trigger that arrives mid-run is logged and ignored rather than queued — two concurrent
-  runs would write the same TIDAL playlists.
+  runs would write the same TIDAL playlists. Export and download share a second runner with
+  the same rule, since a download reads the file an export rewrites.
 
 The page it renders is also the whole API, if you would rather script it:
 
@@ -135,6 +141,13 @@ The page it renders is also the whole API, if you would rather script it:
 curl localhost:8081/api/status | jq        # everything the page shows
 curl -X POST localhost:8081/api/run        # 202 accepted, or 409 if one is running
 curl -X POST 'localhost:8081/api/run?force=true'   # re-mirror even with no new edition
+
+curl -X POST localhost:8081/api/backup/login    # returns the device code to display
+curl -X POST localhost:8081/api/backup/export
+curl -X POST localhost:8081/api/backup/download \
+  -H 'content-type: application/json' \
+  -d '{"dryRun":true,"quality":"lossless","skipTier":"album-agnostic","limit":5}'
+curl -X POST localhost:8081/api/backup/stop     # finishes the current track, then stops
 ```
 
 ## Which playlists get synced
@@ -332,6 +345,135 @@ bun install
 LISTENBRAINZ_USER=... TIDAL_CLIENT_ID=... TIDAL_CLIENT_SECRET=... bun run sync
 ```
 
+## Backing up
+
+Two separate things, in two separate commands, because they carry very different weight.
+
+### `export` — your curation
+
+```bash
+bun run export
+```
+
+Writes `DATA_DIR/export`: `export.json` with every owned playlist, your collection, and full
+metadata for every track either references, plus a `.m3u8` per playlist and one for
+favourites. Uses the same developer-portal credentials as `sync` and needs nothing extra.
+
+This is the part worth doing unconditionally. TIDAL playlists stop existing when a
+subscription lapses, and individual tracks get delisted or silently swapped for a
+`replacement` version while it is still live. An ISRC plus artist/title recorded here stays
+resolvable against MusicBrainz, a local library, or a shop, indefinitely.
+
+The `.m3u8` URI lines point at `Artist/Album/Title.flac` under `LIBRARY_DIR` — files that may
+not exist yet. Players resolve relative paths against the playlist's own location, so
+dropping these next to a filled-in library makes them work with no rewriting. Tracks TIDAL
+would not resolve become `# unresolved TIDAL track <id>` comments rather than silent gaps.
+
+### `download` — the audio
+
+```bash
+bun run download-login          # once
+bun run download --dry-run      # see what it would fetch
+bun run download --limit=5      # start small
+```
+
+Reads the export, then fetches `GET /v2/trackManifests/{id}` with `manifestType=HLS`,
+`uriScheme=HTTPS`, `usage=DOWNLOAD`, pulls the plain HLS segments, and demuxes the FLAC out
+of its MP4 container with `ffmpeg -c copy` (so it stays lossless — the bytes are moved, not
+re-encoded).
+
+### Skipping what you already have
+
+`LIBRARY_DIR` is walked and indexed once at the start of every run, and a track whose file is
+already there is never fetched. This is built for a library some *other* tool wrote, so the
+comparison is deliberately not a path check:
+
+- **Extension is ignored.** An existing `.mp3`, `.m4a`, `.opus` — anything in the audio
+  extension list — counts as present.
+- **Case, accents and punctuation are folded**, so `Bjork/Homogenic/Joga.flac` matches
+  Björk's *Jóga*, and a straight apostrophe matches a curly one.
+- **Every credited artist is tried**, not just the first, since TIDAL's credit order and your
+  library's filing may disagree on a collaboration.
+- **Leading track numbers are looked past**, so `02 - Slam.flac` answers to *Slam*. Measured
+  against a real library, 47% of files carried one — keying on the literal filename alone
+  would have re-downloaded every one of them. The stripped form is registered *alongside*
+  the literal name rather than replacing it, so `99 Problems.flac` is still found under its
+  own name.
+- **Disc folders are seen through**: `Artist/Album/Disc 2/06 - Track.flac` files under
+  *Album*, not *Disc 2*.
+- **A flat release folder** whose files are named `Artist - Title.ext` is matched on the
+  artist in the filename, since there is no artist directory to read.
+
+`TIDAL_SKIP_TIER` (or `--skip-tier=`) sets how close a match has to be:
+
+| Tier | Skips when | Use when |
+| --- | --- | --- |
+| `exact` | artist, album and title all agree | you want every album's own copy |
+| `album-agnostic` *(default)* | artist and title agree, album may differ | you already have most of it |
+| `loose` | also ignores `(Remastered 2011)`-style suffixes | you don't care which master |
+
+`album-agnostic` is the default because the usual mismatch is filing: a track you own from a
+single, a compilation, or a deluxe edition is still a track you own. `loose` is the one that
+can be wrong — it will treat a studio recording as covering `(Live)` — so the run reports
+`Skips by how they were matched` and warns whenever a `loose` match was used.
+
+Start with `--dry-run`, which reads the export and the library, contacts nothing, and works
+before `download-login` has ever been run:
+
+```bash
+bun run download --dry-run | grep 'Would download'
+```
+
+Three things to understand before switching it on.
+
+**It needs a client id that is not yours.** TIDAL grants playback to its own players. Your
+developer-portal token gets `trackPresentation: PREVIEW` with
+`previewReason: FULL_REQUIRES_SUBSCRIPTION` regardless of whose subscription is behind it,
+and the device endpoint rejects it outright with *"Client is not a Limited Input Device
+client"*. So `TIDAL_DEVICE_CLIENT_ID` is a separate setting, it is empty by default, and
+`download` stays off until you fill it in. Doing so is a terms-of-service matter and puts
+the account you authorise at some risk.
+
+**No DRM is being circumvented.** The HLS branch of `trackManifests` returns unencrypted
+segments; it is the MPEG-DASH branch that carries `drmData` with a Widevine/FairPlay
+`licenseUrl`. If TIDAL ever starts serving `#EXT-X-KEY` on this path, the download aborts
+with `EncryptedStreamError` rather than quietly writing files full of silence — decrypting
+streams is deliberately out of scope.
+
+**TIDAL pushes back.** The manifest endpoint rate-limits hard and answers a sustained burst
+with a captcha that deauthenticates the session. Hence `TIDAL_DOWNLOAD_DELAY_MS` (3s
+default), exponential backoff on 429/5xx, and `--limit`. Don't discover that boundary with
+an account you care about.
+
+Entitlement is per track, so `--quality=hires` walks down through `lossless` → `high` → `low`
+rather than failing: a Hi-Res request on a lossless-only track returns a preview, not an
+error, and writing a 30-second file would be worse than taking the tier actually on offer.
+
+### Doing it from the browser
+
+Everything above is also on the dashboard, under **Backup**, as three steps in the order they
+have to happen. Start the daemon and open <http://localhost:8081>.
+
+**1 · Playback session.** *Authorise* asks TIDAL for a device code and shows it with the link
+to approve it — the same flow as `download-login`, but the daemon does the waiting, so it
+works unchanged inside a container with no terminal attached. The step says `off` instead if
+`TIDAL_DEVICE_CLIENT_ID` is unset.
+
+**2 · Export the catalogue.** Runs the same snapshot as `bun run export` and shows what came
+back: playlists, favourites, how many tracks carry an ISRC, how many were tombstoned.
+
+**3 · Download audio.** Source (the collection, or any exported playlist), quality, skip tier
+and a limit, plus a **dry run** box that is ticked by default. While it runs you get a
+progress bar, the track being worked on, and **Stop** — which finishes the current track and
+then stops, rather than leaving a half-written file behind. When it ends you get the same
+counts the CLI prints, including how the skips were matched.
+
+The steps gate each other honestly rather than just greying out: a download says *needs an
+export* until one exists, *needs a session* when it would have to reach TIDAL without one,
+and warns if `ffmpeg` is missing from `PATH` (FLAC arrives inside an MP4 container and cannot
+be unwrapped without it, though the AAC tiers still work). A dry run stays available
+throughout, since it only reads the export and the library.
+
 ## Commands
 
 | Command | Does |
@@ -341,6 +483,9 @@ LISTENBRAINZ_USER=... TIDAL_CLIENT_ID=... TIDAL_CLIENT_SECRET=... bun run sync
 | `bun run favorites` | Only mirror the TIDAL collection back to ListenBrainz |
 | `bun run status` | Show what is mirrored, without contacting TIDAL (`--unresolved` names the favourites MusicBrainz could not place) |
 | `bun run daemon` | Sync on startup, then on `SYNC_SCHEDULE`; serves the dashboard too |
+| `bun run export` | Snapshot your curation to `DATA_DIR/export` (JSON + `.m3u8`) |
+| `bun run download-login` | Authorise the playback session `download` needs (separate from `login`) |
+| `bun run download` | Fetch audio for exported tracks into `LIBRARY_DIR` |
 | `bun test` | Run tests |
 | `bun run typecheck` | `tsc --noEmit` |
 
@@ -361,20 +506,27 @@ LISTENBRAINZ_USER=... TIDAL_CLIENT_ID=... TIDAL_CLIENT_SECRET=... bun run sync
 
 ```
 src/
-  index.ts          CLI: login / sync / favorites / status / daemon
+  index.ts          CLI: login / sync / favorites / status / daemon / export / download
   config.ts         env parsing and validation
+  export.ts         curation snapshot: export.json + .m3u8 per playlist
+  download.ts       fills LIBRARY_DIR from the snapshot, resumable
+  library.ts        index of what is already on disk, so download skips it
   listenbrainz.ts   createdfor listing, JSPF parsing, ISRC resolution, feedback writes
   musicbrainz.ts    batched ISRC -> recording MBID lookup, rate limited
   sync.ts           ListenBrainz -> TIDAL: edition selection, mirroring, state
   favorites.ts      TIDAL -> ListenBrainz: collection to loved recordings
   runner.ts         one run at a time, shared by the CLI, the cron tick and the dashboard
+  backup.ts         device login / export / download as jobs the dashboard can drive
   store.ts          atomic JSON state + run history + lookup cache
   logger.ts
   dashboard/
-    server.ts       status JSON, manual trigger, static assets
+    server.ts       status JSON, manual triggers, backup endpoints, static assets
     public/         the page itself (no build step, no external requests)
   tidal/
     auth.ts         browser login, scope selection, credential guard
+    device-auth.ts  the separate device-flow playback session used by download
+    download.ts     HLS manifest -> segments -> ffmpeg demux
+    catalog.ts      full track metadata and owned-playlist reads, for export
     storage.ts      file-backed StorageAdapter for headless use
     client.ts       playlist find / create / read / replace, collection reads
     match.ts        ISRC-first track matching with search fallback

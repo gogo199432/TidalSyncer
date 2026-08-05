@@ -34,6 +34,12 @@
   box-sizing: border-box;
 }
 
+/* The UA's `display: none` for [hidden] is a bare element rule, so any class here that sets
+   a display would quietly outrank it and leave "hidden" nodes on screen. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -621,6 +627,216 @@ a:hover {
 
 .disclosure-list .is-muted {
   color: var(--text-faint);
+}
+
+/* ---------- backup steps ---------- */
+
+.steps {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: var(--hairline);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  overflow: hidden;
+  counter-reset: step;
+}
+
+.step {
+  padding: 1.4rem 1.5rem 1.5rem;
+  background: var(--ink-raised);
+}
+
+/* A step whose turn has not come yet recedes rather than disappearing, so the sequence
+   stays legible while only one part of it is actionable. */
+.step.is-waiting {
+  opacity: 0.55;
+}
+
+.step-head {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.step-index {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: none;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 50%;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--text-faint);
+}
+
+.step.is-done .step-index {
+  color: var(--tide);
+  border-color: rgba(111, 214, 196, 0.4);
+}
+
+.step-title {
+  flex: 1 1 auto;
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 400;
+}
+
+.step-note {
+  margin: 0.7rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.step-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin-top: 1.1rem;
+}
+
+.run-button-quiet {
+  color: var(--text-dim);
+  border-color: var(--hairline-strong);
+}
+
+.run-button-quiet::before {
+  background: var(--coral);
+}
+
+.run-button-quiet:hover:not(:disabled),
+.run-button-quiet:focus-visible {
+  color: var(--ink);
+  border-color: var(--coral);
+}
+
+/* The spinner is keyed to a running *sync* by default; backup jobs drive their own. */
+.run-button-spinner.is-job {
+  display: none;
+}
+
+.run-button-spinner.is-job.is-spinning {
+  display: block;
+}
+
+/* ---------- device code ---------- */
+
+.device {
+  margin-top: 1.1rem;
+  padding: 1.15rem 1.3rem;
+  background: var(--ink-sunken);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius);
+}
+
+.device-link {
+  display: inline-block;
+  margin-top: 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  word-break: break-all;
+}
+
+.device-code {
+  margin: 0.9rem 0 0;
+  font-family: var(--mono);
+  font-size: clamp(1.6rem, 6vw, 2.4rem);
+  letter-spacing: 0.22em;
+  color: var(--tide);
+}
+
+/* ---------- download form ---------- */
+
+.fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.9rem 1.1rem;
+  margin-top: 1.2rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.field select,
+.field input {
+  width: 100%;
+  padding: 0.55rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  color: var(--text);
+  background: var(--ink-sunken);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius);
+}
+
+.field select:focus-visible,
+.field input:focus-visible {
+  outline: none;
+  border-color: var(--tide-deep);
+}
+
+.field select:disabled,
+.field input:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 1rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.toggle input {
+  width: 0.95rem;
+  height: 0.95rem;
+  accent-color: var(--tide);
+}
+
+/* ---------- download progress ---------- */
+
+.progress {
+  margin-top: 1.2rem;
+}
+
+.progress-track {
+  height: 3px;
+  background: var(--hairline);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--tide);
+  transition: width 0.4s ease;
+}
+
+.readout-tight {
+  margin-top: 1.1rem;
+  padding: 1.1rem 1.2rem;
+  gap: 1rem 1.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
+  background: var(--ink-sunken);
+}
+
+.readout-tight .readout-value {
+  font-size: 1.25rem;
 }
 
 /* ---------- history ---------- */

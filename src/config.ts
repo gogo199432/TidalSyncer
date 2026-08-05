@@ -31,7 +31,32 @@ export type Config = {
     /** Name template for the mirrored playlist. `{title}` is the humanised source patch. */
     playlistNameTemplate: string;
     playlistAccess: "PUBLIC" | "UNLISTED";
+    /**
+     * Client id used by `download` only, and necessarily *not* the developer-portal one
+     * above: TIDAL grants playback to its own players, so a developer-portal token gets a
+     * 30-second preview no matter whose subscription is behind it. Empty disables
+     * downloading entirely; see src/tidal/device-auth.ts.
+     */
+    deviceClientId: string;
+    /** Only some player clients require a secret alongside the id. */
+    deviceClientSecret: string;
+    /**
+     * Pause between track downloads. TIDAL answers a burst on the manifest endpoint with
+     * 429s and eventually a captcha that deauthenticates the session, so the default is
+     * deliberately unhurried.
+     */
+    downloadDelayMs: number;
   };
+  /** Where `download` writes audio files, in `Artist/Album/Title.flac` layout. */
+  libraryDir: string;
+  /** Default tier for `download`; it walks down from here when a track is not entitled. */
+  downloadQuality: "hires" | "lossless" | "high" | "low";
+  /**
+   * How closely a file already in `libraryDir` must match before `download` skips the
+   * track. Loosening this avoids redundant downloads into a library another tool built,
+   * at the cost of occasionally skipping a version you wanted.
+   */
+  skipTier: "exact" | "album-agnostic" | "loose";
   /**
    * Mirror the TIDAL collection's tracks back to ListenBrainz as loved recordings.
    * Additive only: a track dropped from the collection keeps its ListenBrainz love.
@@ -59,6 +84,10 @@ export type Config = {
 };
 
 const LOG_LEVELS = new Set(["debug", "info", "warn", "error"]);
+
+const DOWNLOAD_QUALITIES = new Set(["hires", "lossless", "high", "low"]);
+
+const SKIP_TIERS = new Set(["exact", "album-agnostic", "loose"]);
 
 class ConfigError extends Error {}
 
@@ -129,6 +158,18 @@ export function loadConfig(): Config {
     throw new ConfigError(`TIDAL_REDIRECT_URI must be an absolute URL (got "${redirectUri}")`);
   }
 
+  const downloadQuality = optional("TIDAL_DOWNLOAD_QUALITY", "lossless").toLowerCase();
+  if (!DOWNLOAD_QUALITIES.has(downloadQuality)) {
+    throw new ConfigError(
+      `TIDAL_DOWNLOAD_QUALITY must be one of ${[...DOWNLOAD_QUALITIES].join(", ")} (got "${downloadQuality}")`,
+    );
+  }
+
+  const skipTier = optional("TIDAL_SKIP_TIER", "album-agnostic").toLowerCase();
+  if (!SKIP_TIERS.has(skipTier)) {
+    throw new ConfigError(`TIDAL_SKIP_TIER must be one of ${[...SKIP_TIERS].join(", ")} (got "${skipTier}")`);
+  }
+
   const syncFavorites = boolean("SYNC_FAVORITES", false);
   const listenBrainzToken = optional("LISTENBRAINZ_TOKEN", "");
   if (syncFavorites && !listenBrainzToken) {
@@ -152,7 +193,13 @@ export function loadConfig(): Config {
       skipCollectionFor: list("TIDAL_SKIP_COLLECTION_FOR", []),
       playlistNameTemplate: optional("TIDAL_PLAYLIST_NAME_TEMPLATE", "{title} (ListenBrainz)"),
       playlistAccess,
+      deviceClientId: optional("TIDAL_DEVICE_CLIENT_ID", ""),
+      deviceClientSecret: optional("TIDAL_DEVICE_CLIENT_SECRET", ""),
+      downloadDelayMs: integer("TIDAL_DOWNLOAD_DELAY_MS", 3000, 0, 600_000),
     },
+    libraryDir: resolve(optional("LIBRARY_DIR", "./library")),
+    downloadQuality: downloadQuality as Config["downloadQuality"],
+    skipTier: skipTier as Config["skipTier"],
     syncFavorites,
     dataDir: resolve(optional("DATA_DIR", "./data")),
     schedule: optional("SYNC_SCHEDULE", "0 */6 * * *"),

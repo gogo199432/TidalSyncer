@@ -217,7 +217,7 @@ export function isTitleMatch(candidateTitle: string, wantedTitle: string): boole
   return strippedCandidate === strippedWanted && strippedWanted.length > 0;
 }
 
-function stripParentheticals(value: string): string {
+export function stripParentheticals(value: string): string {
   return value
     .replace(/\s*[([][^)\]]*[)\]]/g, "")
     .replace(/\s+/g, " ")
@@ -229,7 +229,7 @@ function stripParentheticals(value: string): string {
  * case, accents (NFKD then drop combining marks), and punctuation such as the various
  * apostrophes and dashes. Brackets survive so `stripParentheticals` can still act on them.
  */
-function normalize(value: string): string {
+export function normalize(value: string): string {
   return value
     .toLowerCase()
     .normalize("NFKD")
