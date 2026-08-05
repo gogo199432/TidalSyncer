@@ -58,6 +58,18 @@ export type Config = {
    */
   skipTier: "exact" | "album-agnostic" | "loose";
   /**
+   * Default for `download --upgrade`: replace a file already in the library when TIDAL has
+   * a better one. Off by default — it is the only mode that touches files you already have.
+   */
+  upgrade: boolean;
+  /**
+   * Where `--upgrade` puts the file it replaced. Empty means delete it instead, which is a
+   * deliberate choice rather than a default: replacing most of a library can retire several
+   * gigabytes, and that has to land somewhere with room for it. Nothing is ever removed
+   * until the replacement is written either way.
+   */
+  replacedDir: string;
+  /**
    * Mirror the TIDAL collection's tracks back to ListenBrainz as loved recordings.
    * Additive only: a track dropped from the collection keeps its ListenBrainz love.
    */
@@ -200,6 +212,13 @@ export function loadConfig(): Config {
     libraryDir: resolve(optional("LIBRARY_DIR", "./library")),
     downloadQuality: downloadQuality as Config["downloadQuality"],
     skipTier: skipTier as Config["skipTier"],
+    upgrade: boolean("TIDAL_UPGRADE", false),
+    // Resolved only when set, so "" stays "" and means delete rather than resolving to cwd.
+    replacedDir: process.env.TIDAL_REPLACED_DIR?.trim()
+      ? resolve(process.env.TIDAL_REPLACED_DIR.trim())
+      : process.env.TIDAL_REPLACED_DIR === ""
+        ? ""
+        : resolve(optional("DATA_DIR", "./data"), "replaced"),
     syncFavorites,
     dataDir: resolve(optional("DATA_DIR", "./data")),
     schedule: optional("SYNC_SCHEDULE", "0 */6 * * *"),

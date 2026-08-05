@@ -449,6 +449,47 @@ Entitlement is per track, so `--quality=hires` walks down through `lossless` →
 rather than failing: a Hi-Res request on a lossless-only track returns a preview, not an
 error, and writing a 30-second file would be worse than taking the tier actually on offer.
 
+### Upgrading what you already have
+
+```bash
+bun run download --upgrade --dry-run    # what it would replace, and with what
+bun run download --upgrade --limit=5
+```
+
+`--upgrade` (or `TIDAL_UPGRADE`) turns a match into a *candidate* rather than an automatic
+skip: if TIDAL would serve something better than the file on disk, it fetches it and retires
+the old one. A library assembled from whatever was to hand is usually mostly lossy, and this
+is how it becomes lossless without re-downloading the parts that are already fine.
+
+Quality is read with `ffprobe`, not guessed from the extension — `.m4a` is AAC or ALAC
+depending on the file, and `.flac` says nothing about whether it is 16 or 24 bit. Three rungs:
+
+| Tier | What counts |
+| --- | --- |
+| `lossy` | AAC, MP3, Vorbis, Opus, WMA |
+| `lossless` | FLAC, ALAC, WAV, APE, WavPack at CD depth |
+| `hires` | any of those at 24-bit, or above 48 kHz |
+
+Two things keep this honest:
+
+- **The comparison is against what would actually be downloaded** — the best TIDAL offers,
+  capped by `--quality`. A `lossless` run never claims it is about to upgrade a CD-quality
+  FLAC to hi-res and then writes 16-bit. Ask for `--quality=hires` if you want those.
+- **A file that cannot be read is left alone.** `ffprobe` failing is not evidence that
+  TIDAL's copy is better, and overwriting is the wrong way to resolve the doubt.
+
+`DOLBY_ATMOS` is ignored where TIDAL offers it: it is a different mix, not a better one, and
+this downloads stereo.
+
+**Where the old file goes.** `TIDAL_REPLACED_DIR` (default `DATA_DIR/replaced`) receives it,
+mirroring its path in the library. Nothing is ever removed before the replacement is on disk,
+and if the download fails the original is put straight back. Set it to an empty string to
+delete instead — a deliberate choice, not a default, because it forecloses the undo.
+
+Mind the size. Replacing most of a library retires most of a library: 550 lossy files is
+somewhere around 2 GB, and it has to land somewhere with room. That is a poor fit for a small
+state volume, so point `TIDAL_REPLACED_DIR` at real storage or accept the deletion.
+
 ### Doing it from the browser
 
 Everything above is also on the dashboard, under **Backup**, as three steps in the order they
@@ -462,11 +503,20 @@ works unchanged inside a container with no terminal attached. The step says `off
 **2 · Export the catalogue.** Runs the same snapshot as `bun run export` and shows what came
 back: playlists, favourites, how many tracks carry an ISRC, how many were tombstoned.
 
-**3 · Download audio.** Source (the collection, or any exported playlist), quality, skip tier
-and a limit, plus a **dry run** box that is ticked by default. While it runs you get a
-progress bar, the track being worked on, and **Stop** — which finishes the current track and
-then stops, rather than leaving a half-written file behind. When it ends you get the same
-counts the CLI prints, including how the skips were matched.
+**3 · Download audio.** Source (the collection, or any exported playlist), quality, skip
+tier and a limit, plus **dry run** (ticked by default) and **upgrade**.
+
+The bar is stacked rather than a single fill, because how far along a run is matters less
+than what it is producing: downloads, upgrades, skips, and failures each take their own
+colour, with the remainder left dark. A growing red band says the run is failing without
+anyone reading a log, and the leading edge keeps drifting while a track is in flight so a
+slow download does not look like a stalled one.
+
+Underneath is the per-track list — what happened, or on a dry run what *would* happen, with
+the quality change on each upgrade row. Skips are folded away by default (on a filled-in
+library they are most of the list and none of the news), and when anything fails a red
+**N failed** control filters straight to those rather than making you scroll past the
+successes. **Stop** finishes the current track and then stops.
 
 The steps gate each other honestly rather than just greying out: a download says *needs an
 export* until one exists, *needs a session* when it would have to reach TIDAL without one,

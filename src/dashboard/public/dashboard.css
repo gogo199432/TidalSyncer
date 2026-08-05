@@ -813,19 +813,190 @@ a:hover {
   margin-top: 1.2rem;
 }
 
+/* Segments sit side by side and grow; the remainder of the track shows through as "left". */
 .progress-track {
-  height: 3px;
+  display: flex;
+  height: 6px;
   background: var(--hairline);
-  border-radius: 2px;
+  border-radius: 3px;
   overflow: hidden;
 }
 
-.progress-fill {
-  height: 100%;
+.progress-seg {
   width: 0;
-  background: var(--tide);
-  transition: width 0.4s ease;
+  transition: width 0.5s cubic-bezier(0.2, 0.7, 0.3, 1);
 }
+
+.seg-downloaded { background: var(--tide); }
+.seg-upgraded { background: #7fb2f0; }
+.seg-skipped { background: var(--tide-deep); }
+.seg-unavailable { background: var(--amber); }
+.seg-failed { background: var(--coral); }
+
+/* The unfilled remainder drifts while a track is in flight. A download can sit on one track
+   for many seconds, and a bar that only moves on completion reads as a hung one. */
+.progress-track {
+  position: relative;
+}
+
+.progress-track.is-live::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(111, 214, 196, 0.35), transparent);
+  background-size: 35% 100%;
+  background-repeat: no-repeat;
+  animation: drift 1.9s linear infinite;
+}
+
+@keyframes drift {
+  from {
+    background-position: -35% 0;
+  }
+  to {
+    background-position: 135% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-track.is-live::after {
+    animation: none;
+  }
+}
+
+.progress-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.1rem;
+  margin-top: 0.7rem;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--text-faint);
+}
+
+.progress-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.progress-legend i {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+}
+
+/* ---------- per-track results ---------- */
+
+.events {
+  margin-top: 1.1rem;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  background: var(--ink-sunken);
+}
+
+.events-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem 0.9rem;
+  border-bottom: 1px solid var(--hairline);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--text-faint);
+}
+
+.link-button {
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--hairline-strong);
+  cursor: pointer;
+}
+
+.link-button:hover,
+.link-button:focus-visible {
+  color: var(--tide);
+  border-bottom-color: var(--tide);
+  outline: none;
+}
+
+.link-button-bad {
+  color: var(--coral);
+  border-bottom-color: rgba(226, 112, 95, 0.5);
+}
+
+.link-button-bad:hover,
+.link-button-bad:focus-visible {
+  color: var(--coral);
+  border-bottom-color: var(--coral);
+}
+
+.events-controls {
+  display: flex;
+  gap: 1rem;
+}
+
+.events-list {
+  max-height: 19rem;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.event {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: baseline;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.82rem;
+  border-bottom: 1px solid rgba(236, 230, 218, 0.04);
+}
+
+.event:last-child {
+  border-bottom: none;
+}
+
+.event-tag {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.event-track {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.event-detail {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--text-faint);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* A failure is the row you must not scroll past, so it keeps its colour and a marker. */
+.event-failed {
+  background: rgba(226, 112, 95, 0.07);
+  box-shadow: inset 2px 0 0 var(--coral);
+}
+
+.event-failed .event-tag { color: var(--coral); }
+.event-downloaded .event-tag { color: var(--tide); }
+.event-upgraded .event-tag { color: #7fb2f0; }
+.event-unavailable .event-tag { color: var(--amber); }
+.event-skipped .event-tag { color: var(--text-faint); }
+.event-skipped .event-track { color: var(--text-dim); }
 
 .readout-tight {
   margin-top: 1.1rem;

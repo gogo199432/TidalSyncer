@@ -509,6 +509,14 @@ function renderDownloadStep(backup) {
   applyDownloadDefaults(backup);
   syncPlaylistOptions(summary);
 
+  // Upgrading probes each matched file with ffprobe and then rewrites it, so it is the one
+  // option that cannot work at all without ffmpeg on PATH.
+  const upgradeBox = $("field-upgrade");
+  if (!backup.ffmpeg) {
+    upgradeBox.checked = false;
+    upgradeBox.disabled = true;
+  }
+
   // Everything downstream needs the export, dry runs included — the run is driven from it.
   const blocked = !summary
     ? "Run the export first — the download works from that snapshot, not from TIDAL directly."
@@ -520,6 +528,7 @@ function renderDownloadStep(backup) {
   for (const id of ["field-playlist", "field-quality", "field-skip-tier", "field-limit", "field-dry-run"]) {
     $(id).disabled = running;
   }
+  if (backup.ffmpeg) upgradeBox.disabled = running;
 
   const dryRun = $("field-dry-run").checked;
   const needsAuth = !dryRun && backup.auth.state !== "authorised";
@@ -534,11 +543,28 @@ function renderDownloadStep(backup) {
   stop.disabled = backup.stopping;
   stop.querySelector(".run-button-label").textContent = backup.stopping ? "Stopping" : "Stop";
 
-  $("download-progress").hidden = !running || !progress;
-  if (running && progress) {
-    $("progress-fill").style.width = `${Math.round((progress.index / progress.total) * 100)}%`;
-    $("progress-line").textContent = `${progress.index} / ${progress.total} · ${progress.track}`;
+  // The bar outlives the run: once it finishes, its final shape is the summary.
+  const events = backup.download.events ?? [];
+  const total = progress?.total ?? report?.total ?? events.length;
+  $("download-progress").hidden = events.length === 0 && !running;
+  $("progress-track").classList.toggle("is-live", running);
+
+  if (total > 0) {
+    const tally = { downloaded: 0, upgraded: 0, skipped: 0, unavailable: 0, failed: 0 };
+    for (const event of events) tally[event.outcome] = (tally[event.outcome] ?? 0) + 1;
+
+    for (const [outcome, count] of Object.entries(tally)) {
+      $(`seg-${outcome}`).style.width = `${(count / total) * 100}%`;
+    }
+
+    const done = events.length;
+    renderLegend(tally, total - done, request?.dryRun);
+    $("progress-line").textContent = running
+      ? `${progress?.index ?? done} / ${total} · ${progress?.track ?? "…"}`
+      : `${done} of ${total} considered`;
   }
+
+  renderEvents(events, running, request);
 
   if (running) {
     chip("download-chip", "warn", request?.dryRun ? "dry run" : "running");
@@ -565,6 +591,8 @@ function renderDownloadStep(backup) {
     report
       ? [
           ["Downloaded", report.downloaded],
+          // Only meaningful in an upgrade run, and a constant zero otherwise.
+          ...(report.upgraded > 0 || request?.upgrade ? [["Upgraded", report.upgraded, "replaced"]] : []),
           ["Skipped", report.skipped, "already on disk"],
           ["Unavailable", report.unavailable, "preview only"],
           ["Failed", report.failed],
@@ -574,10 +602,132 @@ function renderDownloadStep(backup) {
   );
 }
 
+/** On a dry run the same outcomes are a plan, so they read in the conditional. */
+const OUTCOME_LABEL = {
+  downloaded: ["downloaded", "to fetch"],
+  upgraded: ["upgraded", "to replace"],
+  skipped: ["skipped", "already there"],
+  unavailable: ["unavailable", "unavailable"],
+  failed: ["failed", "failed"],
+};
+
+function renderLegend(tally, remaining, dryRun) {
+  const legend = $("progress-legend");
+  legend.replaceChildren();
+
+  for (const [outcome, count] of Object.entries(tally)) {
+    if (count === 0) continue;
+    const entry = el("span");
+    const swatch = el("i");
+    swatch.className = `seg-${outcome}`;
+    entry.append(swatch, el("span", null, `${count} ${OUTCOME_LABEL[outcome][dryRun ? 1 : 0]}`));
+    legend.append(entry);
+  }
+
+  if (remaining > 0) {
+    const entry = el("span");
+    const swatch = el("i");
+    swatch.style.background = "var(--hairline-strong)";
+    entry.append(swatch, el("span", null, `${remaining} left`));
+    legend.append(entry);
+  }
+}
+
+/** How many rows to render. The list is for watching and for auditing, not for scrolling. */
+const EVENT_ROWS = 300;
+
+/**
+ * The per-track record.
+ *
+ * Newest first while a run is going, because the interesting row is the one that just
+ * happened; oldest first once it has finished, because then it reads as a report. Skips are
+ * folded away by default — on this library they are most of the list and none of the news.
+ */
+let eventsFilter = "default";
+
+function renderEvents(events, running, request) {
+  const container = $("download-events");
+  if (events.length === 0) {
+    container.replaceChildren();
+    return;
+  }
+
+  const dryRun = Boolean(request?.dryRun);
+  const skipped = events.filter((event) => event.outcome === "skipped").length;
+  const failed = events.filter((event) => event.outcome === "failed").length;
+
+  const shown =
+    eventsFilter === "failed"
+      ? events.filter((event) => event.outcome === "failed")
+      : eventsFilter === "all"
+        ? events
+        : events.filter((event) => event.outcome !== "skipped");
+  const ordered = running ? [...shown].reverse() : shown;
+
+  const wrap = el("div", "events");
+  const head = el("div", "events-head");
+  head.append(el("span", null, dryRun ? "What it would do" : "What it did"));
+
+  const controls = el("div", "events-controls");
+  const toggle = (label, target, className) => {
+    const button = el("button", `link-button${className ? ` ${className}` : ""}`, label);
+    button.type = "button";
+    button.addEventListener("click", () => {
+      eventsFilter = eventsFilter === target ? "default" : target;
+      renderEvents(events, running, request);
+    });
+    controls.append(button);
+  };
+
+  // Failures are the reason to be looking at this list at all, so they get their own way in
+  // rather than being somewhere down a scroll of successes.
+  if (failed > 0) {
+    toggle(eventsFilter === "failed" ? "show all" : `${failed} failed`, "failed", "link-button-bad");
+  }
+  if (skipped > 0) {
+    toggle(eventsFilter === "all" ? `hide ${skipped} skipped` : `show ${skipped} skipped`, "all");
+  }
+  head.append(controls);
+
+  const list = el("ul", "events-list");
+  for (const event of ordered.slice(0, EVENT_ROWS)) {
+    const row = el("li", `event event-${event.outcome}`);
+    row.append(el("span", "event-tag", OUTCOME_LABEL[event.outcome][dryRun ? 1 : 0]));
+
+    const body = el("span", "event-track", event.track);
+    body.title = event.track;
+    if (event.detail || event.path) {
+      const detail = el("span", "event-detail", event.detail ?? event.path);
+      // A failure's error is the whole point of the row; a path is just context.
+      if (event.detail && event.path) detail.title = event.path;
+      body.append(detail);
+    }
+    row.append(body);
+    list.append(row);
+  }
+
+  if (ordered.length > EVENT_ROWS) {
+    const more = el("li", "event");
+    more.append(el("span", "event-tag", ""), el("span", "event-detail", `… and ${ordered.length - EVENT_ROWS} more`));
+    list.append(more);
+  }
+
+  wrap.append(head, list);
+  container.replaceChildren(wrap);
+}
+
 function describeReport(report, request, backup) {
   const parts = [];
-  if (request?.dryRun) parts.push("Dry run — nothing was written.");
+  if (request?.dryRun) parts.push("Dry run — nothing was written; the counts are what it would do.");
   if (report.stopped) parts.push("Stopped before the end of the list.");
+
+  if (report.upgraded > 0) {
+    const from = report.upgradedFrom ?? {};
+    parts.push(`Replaced ${plural(report.upgraded, "file")} (${from.lossy ?? 0} lossy, ${from.lossless ?? 0} lossless) — old copies are in DATA_DIR/replaced.`);
+  }
+  if (request?.upgrade && report.alreadyBest > 0) {
+    parts.push(`${report.alreadyBest} were already as good as TIDAL's copy.`);
+  }
 
   const tiers = report.skippedByTier;
   if (tiers && report.skipped > 0) {
@@ -668,6 +818,7 @@ $("download-button").addEventListener("click", () => {
       skipTier: $("field-skip-tier").value,
       limit: $("field-limit").value || undefined,
       dryRun: $("field-dry-run").checked,
+      upgrade: $("field-upgrade").checked,
     }),
   );
 });

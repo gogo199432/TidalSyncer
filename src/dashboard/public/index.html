@@ -187,12 +187,35 @@
               <span>Dry run — list what would be fetched, download nothing</span>
             </label>
 
+            <label class="toggle">
+              <input id="field-upgrade" type="checkbox" />
+              <span>
+                Upgrade — also replace files TIDAL has a better copy of. The old file moves
+                to <code>DATA_DIR/replaced</code>, never deleted.
+              </span>
+            </label>
+
+            <!--
+              A stacked bar rather than one fill: the point is not just how far along it is
+              but what it is producing — a growing red band says the run is failing without
+              anyone having to read the log.
+            -->
             <div class="progress" id="download-progress" hidden>
-              <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+              <div class="progress-track" id="progress-track">
+                <div class="progress-seg seg-downloaded" id="seg-downloaded"></div>
+                <div class="progress-seg seg-upgraded" id="seg-upgraded"></div>
+                <div class="progress-seg seg-skipped" id="seg-skipped"></div>
+                <div class="progress-seg seg-unavailable" id="seg-unavailable"></div>
+                <div class="progress-seg seg-failed" id="seg-failed"></div>
+              </div>
+              <div class="progress-legend" id="progress-legend"></div>
               <p class="step-note" id="progress-line">&nbsp;</p>
             </div>
 
             <div class="readout readout-tight" id="download-readout" hidden></div>
+
+            <!-- What it did, or on a dry run what it would do, track by track. -->
+            <div id="download-events"></div>
 
             <div class="step-actions">
               <button type="button" id="download-button" class="run-button">

@@ -178,6 +178,7 @@ async function parseDownloadRequest(
       limit,
       playlist,
       dryRun: Boolean(body.dryRun) || deps.config.dryRun,
+      upgrade: body.upgrade === undefined ? deps.config.upgrade : Boolean(body.upgrade),
     },
   };
 }

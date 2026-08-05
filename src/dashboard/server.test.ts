@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,16 +23,24 @@ let base: string;
 const TRACKS = {
   "1": { tidalId: "1", title: "Karma Police", artists: ["Radiohead"], album: "OK Computer", path: "Radiohead/OK Computer/Karma Police.flac" },
   "2": { tidalId: "2", title: "Avril 14th", artists: ["Aphex Twin"], album: "Drukqs", path: "Aphex Twin/Drukqs/Avril 14th.flac" },
-  "3": { tidalId: "3", title: "Glory Box", artists: ["Portishead"], album: "Dummy", path: "Portishead/Dummy/Glory Box.flac" },
+  "3": { tidalId: "3", title: "Glory Box", artists: ["Portishead"], album: "Dummy", path: "Portishead/Dummy/Glory Box.flac", mediaTags: ["LOSSLESS"] },
 };
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "dashboard-backup-"));
 
-  // One of the three is already on disk, as an .mp3 from some other tool.
+  // One of the three is already on disk, as a lossy file from some other tool. Real audio
+  // rather than an empty file, so the upgrade path has something to probe.
   const existing = join(root, "library", "Portishead", "Dummy");
   await mkdir(existing, { recursive: true });
-  await writeFile(join(existing, "Glory Box.mp3"), "");
+  const encoded = spawnSync("ffmpeg", [
+    "-y", "-hide_banner", "-loglevel", "error",
+    "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+    "-c:a", "libmp3lame", join(existing, "Glory Box.mp3"),
+  ]);
+  // Without ffmpeg it stays a zero-byte placeholder: still matched by the index, but the
+  // upgrade tests below skip themselves.
+  if (encoded.status !== 0) await writeFile(join(existing, "Glory Box.mp3"), "");
 
   await mkdir(join(root, "data", "export"), { recursive: true });
   await writeFile(
@@ -177,7 +186,9 @@ describe("backup endpoints", () => {
     expect(backup.download.report.total).toBe(3);
     // Glory Box.mp3 is already there under a different extension.
     expect(backup.download.report.skipped).toBe(1);
-    expect(backup.download.report.downloaded).toBe(0);
+    // On a dry run the counts are the plan, so the other two read as "would download".
+    expect(backup.download.report.downloaded).toBe(2);
+    expect(backup.download.report.upgraded).toBe(0);
     expect(backup.download.report.stopped).toBe(false);
   });
 
@@ -202,5 +213,91 @@ describe("backup endpoints", () => {
     expect((await post("/api/backup/download", { dryRun: true, playlist: "Nope" })).status).toBe(202);
     const backup = await settle();
     expect(backup.download.error).toContain("No exported playlist");
+  });
+});
+
+/**
+ * Upgrading is the one mode that touches files the user already has, so the decision needs
+ * to be visible before it acts: a dry run must say what it would replace and what with.
+ */
+const hasFfmpeg = Boolean(Bun.which("ffmpeg") && Bun.which("ffprobe"));
+
+describe.if(hasFfmpeg)("upgrade mode", () => {
+  test("leaves the existing file alone when upgrading is off", async () => {
+    expect((await post("/api/backup/download", { dryRun: true, upgrade: false })).status).toBe(202);
+
+    const backup = await settle();
+    expect(backup.download.report.upgraded).toBe(0);
+    expect(backup.download.report.skipped).toBe(1);
+  });
+
+  test("plans a replacement for a lossy file TIDAL has lossless", async () => {
+    expect((await post("/api/backup/download", { dryRun: true, upgrade: true })).status).toBe(202);
+
+    const backup = await settle();
+    // Glory Box.mp3 is lossy and TIDAL tags the track LOSSLESS, so it becomes an upgrade
+    // rather than a skip.
+    expect(backup.download.report.upgraded).toBe(1);
+    expect(backup.download.report.upgradedFrom.lossy).toBe(1);
+    expect(backup.download.report.skipped).toBe(0);
+    expect(backup.download.report.alreadyBest).toBe(0);
+  });
+
+  test("does not plan a replacement a lossless run could not deliver", async () => {
+    // The AAC tiers are lossy, so nothing a `high` run downloads beats an existing mp3.
+    expect((await post("/api/backup/download", { dryRun: true, upgrade: true, quality: "high" })).status).toBe(202);
+
+    const backup = await settle();
+    expect(backup.download.report.upgraded).toBe(0);
+    expect(backup.download.report.alreadyBest).toBe(1);
+    expect(backup.download.report.skipped).toBe(1);
+  });
+
+  test("carries the flag through to the report's request", async () => {
+    expect((await post("/api/backup/download", { dryRun: true, upgrade: true })).status).toBe(202);
+    expect((await settle()).download.request.upgrade).toBe(true);
+  });
+});
+
+describe.if(hasFfmpeg)("per-track events", () => {
+  test("a dry run lists every track and what would happen to it", async () => {
+    expect((await post("/api/backup/download", { dryRun: true, upgrade: true })).status).toBe(202);
+    const { download } = await settle();
+
+    // One row per track considered, in run order — this is what the page lists.
+    expect(download.events).toHaveLength(3);
+    expect(download.events.map((event: Snapshot) => event.index)).toEqual([1, 2, 3]);
+
+    const outcomes = Object.fromEntries(
+      download.events.map((event: Snapshot) => [event.track, event.outcome]),
+    );
+    expect(outcomes["Radiohead - Karma Police"]).toBe("downloaded");
+    expect(outcomes["Aphex Twin - Avril 14th"]).toBe("downloaded");
+    expect(outcomes["Portishead - Glory Box"]).toBe("upgraded");
+  });
+
+  test("an upgrade row says what it is replacing and with what", async () => {
+    expect((await post("/api/backup/download", { dryRun: true, upgrade: true })).status).toBe(202);
+    const { download } = await settle();
+
+    const upgrade = download.events.find((event: Snapshot) => event.outcome === "upgraded");
+    // "mp3 44.1kHz → lossless" — enough to judge the swap without opening the file.
+    expect(upgrade.detail).toContain("mp3");
+    expect(upgrade.detail).toContain("→ lossless");
+    expect(upgrade.path).toBe("Portishead/Dummy/Glory Box.mp3");
+  });
+
+  test("a skip says which tier matched it", async () => {
+    expect((await post("/api/backup/download", { dryRun: true })).status).toBe(202);
+    const { download } = await settle();
+
+    const skip = download.events.find((event: Snapshot) => event.outcome === "skipped");
+    expect(skip.detail).toBe("exact");
+    expect(skip.path).toBe("Portishead/Dummy/Glory Box.mp3");
+  });
+
+  test("events reset between runs rather than accumulating", async () => {
+    expect((await post("/api/backup/download", { dryRun: true, limit: 1 })).status).toBe(202);
+    expect((await settle()).download.events).toHaveLength(1);
   });
 });

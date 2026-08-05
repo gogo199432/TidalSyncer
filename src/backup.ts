@@ -4,6 +4,7 @@ import type { Config } from "./config.ts";
 import {
   logDownloadReport,
   runDownload,
+  type DownloadEvent,
   type DownloadProgress,
   type DownloadReport,
 } from "./download.ts";
@@ -45,6 +46,8 @@ export type DownloadRequest = {
   limit?: number;
   skipTier: MatchTier;
   dryRun: boolean;
+  /** Replace library files TIDAL has a better copy of, rather than skipping them. */
+  upgrade: boolean;
 };
 
 /** Enough of the export to drive the page, without shipping the whole manifest each poll. */
@@ -58,7 +61,7 @@ export type BackupSnapshot = {
   libraryDir: string;
   /** FLAC arrives inside an MP4 container, so without ffmpeg only the AAC tiers work. */
   ffmpeg: boolean;
-  defaults: { quality: Quality; skipTier: MatchTier; delayMs: number };
+  defaults: { quality: Quality; skipTier: MatchTier; delayMs: number; upgrade: boolean };
   auth: {
     state: AuthState;
     /** Where the user must go to approve the device. Only while `pending`. */
@@ -82,8 +85,17 @@ export type BackupSnapshot = {
     request: DownloadRequest | null;
     finishedAt: string | null;
     error: string | null;
+    /** What happened to each track, in order. The page lists these and colours the bar. */
+    events: DownloadEvent[];
   };
 };
+
+/**
+ * Cap on retained events. A whole collection is under a thousand tracks, so this keeps the
+ * full record of any realistic run while bounding what a pathological one can hold — and
+ * what every status poll has to serialise.
+ */
+const MAX_EVENTS = 5000;
 
 export class BackupRunner {
   private active: { job: BackupJob; startedAt: string } | undefined;
@@ -98,6 +110,7 @@ export class BackupRunner {
   private exportError: string | null = null;
 
   private progress: DownloadProgress | null = null;
+  private events: DownloadEvent[] = [];
   private downloadReport: DownloadReport | null = null;
   private downloadRequest: DownloadRequest | null = null;
   private downloadFinishedAt: string | null = null;
@@ -143,6 +156,7 @@ export class BackupRunner {
         quality: this.config.downloadQuality,
         skipTier: this.config.skipTier,
         delayMs: this.config.tidal.downloadDelayMs,
+        upgrade: this.config.upgrade,
       },
       auth: {
         state: this.authState,
@@ -159,6 +173,7 @@ export class BackupRunner {
       },
       download: {
         progress: this.progress,
+        events: this.events,
         report: this.downloadReport,
         request: this.downloadRequest,
         finishedAt: this.downloadFinishedAt,
@@ -253,6 +268,7 @@ export class BackupRunner {
     this.downloadError = null;
     this.downloadFinishedAt = null;
     this.progress = null;
+    this.events = [];
 
     void (async () => {
       try {
@@ -261,6 +277,9 @@ export class BackupRunner {
           signal: controller.signal,
           onProgress: (progress) => {
             this.progress = progress;
+          },
+          onEvent: (event) => {
+            if (this.events.length < MAX_EVENTS) this.events.push(event);
           },
         });
         logDownloadReport(report);

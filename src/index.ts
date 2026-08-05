@@ -43,6 +43,8 @@ Options:
   --limit=N     With 'download': stop after N tracks
   --skip-tier=T With 'download': how closely a file already in LIBRARY_DIR must match
                 before the track is skipped — exact | album-agnostic | loose
+  --upgrade     With 'download': also replace files TIDAL has a better copy of. The old
+                file moves to DATA_DIR/replaced rather than being deleted
   --dry-run     With 'download': list what would be fetched, contacting nothing
   --help        Show this message
 
@@ -89,6 +91,7 @@ async function main(): Promise<number> {
         limit: option("limit") ? Number(option("limit")) : undefined,
         dryRun: args.includes("--dry-run") || config.dryRun,
         skipTier: (option("skip-tier") ?? config.skipTier) as MatchTier,
+        upgrade: args.includes("--upgrade") || config.upgrade,
       });
     default:
       console.error(`Unknown command "${command}"\n`);
