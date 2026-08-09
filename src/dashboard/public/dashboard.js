@@ -460,31 +460,33 @@ function renderAuthStep(backup) {
   button.disabled = view.disabled;
 }
 
+/**
+ * Read-only: the snapshot is a phase of the run below, not something to press. It still gets
+ * its own step because what it found — how many playlists, how many ISRCs — is the thing that
+ * says whether the download is about to work from a picture worth having.
+ */
 function renderExportStep(backup) {
   const running = backup.running === "export";
-  const { summary, lastRunAt, error } = backup.export;
+  const { summary, error } = backup.export;
   const step = $("step-export");
 
   step.classList.toggle("is-done", Boolean(summary) && !error);
-  $("export-button").disabled = Boolean(backup.running);
-  $("export-button").querySelector(".run-button-label").textContent = running ? "Exporting" : "Export now";
 
   if (running) {
     chip("export-chip", "warn", "running");
     $("export-note").textContent = "Reading playlists, the collection and every track's metadata…";
   } else if (error) {
     chip("export-chip", "bad", "failed");
-    $("export-note").textContent = error;
+    $("export-note").textContent = `${error} — the download below fell back to the previous snapshot.`;
   } else if (summary) {
     chip("export-chip", "good", "ready");
-    $("export-note").textContent = `Snapshot taken ${ago(summary.exportedAt)}. Re-run it whenever your playlists change.`;
+    $("export-note").textContent = `Taken ${ago(summary.exportedAt)}. Refreshed automatically before every download.`;
   } else {
     chip("export-chip", "idle", "never run");
     $("export-note").textContent =
-      "Playlists, the collection and every ISRC — written to DATA_DIR/export. Downloading reads this.";
+      "Playlists, the collection and every ISRC — written to DATA_DIR/export. The download " +
+      "below takes this first, then works from it.";
   }
-
-  if (lastRunAt && !summary && !error) $("export-note").textContent = "Export produced nothing.";
 
   readout(
     "export-readout",
@@ -503,7 +505,10 @@ function renderExportStep(backup) {
 function renderDownloadStep(backup) {
   const { summary } = backup.export;
   const { progress, report, request, error } = backup.download;
-  const running = backup.running === "download";
+  // Both phases of a backup belong to this step: the snapshot is something the run does, not
+  // something to wait for before starting it.
+  const running = Boolean(backup.running);
+  const snapshotting = backup.running === "export";
   const step = $("step-download");
 
   applyDownloadDefaults(backup);
@@ -517,25 +522,30 @@ function renderDownloadStep(backup) {
     upgradeBox.disabled = true;
   }
 
-  // Everything downstream needs the export, dry runs included — the run is driven from it.
-  const blocked = !summary
-    ? "Run the export first — the download works from that snapshot, not from TIDAL directly."
+  const dryRun = $("field-dry-run").checked;
+  const needsAuth = !dryRun && backup.auth.state !== "authorised";
+
+  // A real run takes its own snapshot, so only a dry run — which contacts nothing — can be
+  // stranded without one.
+  const blocked = dryRun && !summary
+    ? "Nothing to plan against yet. Untick dry run to take the first snapshot and fetch from it."
     : !backup.ffmpeg
       ? "ffmpeg is not on PATH. FLAC arrives inside an MP4 container and cannot be unwrapped without it; the AAC tiers still work."
       : null;
 
-  step.classList.toggle("is-waiting", !summary);
+  step.classList.toggle("is-waiting", dryRun && !summary);
   for (const id of ["field-playlist", "field-quality", "field-skip-tier", "field-limit", "field-dry-run"]) {
     $(id).disabled = running;
   }
   if (backup.ffmpeg) upgradeBox.disabled = running;
 
-  const dryRun = $("field-dry-run").checked;
-  const needsAuth = !dryRun && backup.auth.state !== "authorised";
-
   const button = $("download-button");
-  button.disabled = running || Boolean(backup.running) || !summary || needsAuth;
-  button.querySelector(".run-button-label").textContent = running ? "Downloading" : "Start download";
+  button.disabled = running || needsAuth || (dryRun && !summary);
+  button.querySelector(".run-button-label").textContent = snapshotting
+    ? "Snapshotting"
+    : running
+      ? "Downloading"
+      : "Sync & download";
   button.querySelector(".run-button-spinner").classList.toggle("is-spinning", running);
 
   const stop = $("stop-button");
@@ -543,10 +553,11 @@ function renderDownloadStep(backup) {
   stop.disabled = backup.stopping;
   stop.querySelector(".run-button-label").textContent = backup.stopping ? "Stopping" : "Stop";
 
-  // The bar outlives the run: once it finishes, its final shape is the summary.
+  // The bar outlives the run: once it finishes, its final shape is the summary. It stays
+  // hidden through the snapshot phase, which has no tracks to count yet.
   const events = backup.download.events ?? [];
   const total = progress?.total ?? report?.total ?? events.length;
-  $("download-progress").hidden = events.length === 0 && !running;
+  $("download-progress").hidden = events.length === 0 && (snapshotting || !running);
   $("progress-track").classList.toggle("is-live", running);
 
   if (total > 0) {
@@ -566,8 +577,13 @@ function renderDownloadStep(backup) {
 
   renderEvents(events, running, request);
 
-  if (running) {
-    chip("download-chip", "warn", request?.dryRun ? "dry run" : "running");
+  const trigger = backup.runningTrigger === "schedule" ? "scheduled · " : "";
+
+  if (snapshotting) {
+    chip("download-chip", "warn", `${trigger}snapshotting`);
+    $("download-note").textContent = "Refreshing the catalogue snapshot, then fetching audio from it…";
+  } else if (running) {
+    chip("download-chip", "warn", `${trigger}${request?.dryRun ? "dry run" : "running"}`);
     $("download-note").textContent = `Writing to ${backup.libraryDir} · ${backup.defaults.delayMs}ms between tracks`;
   } else if (error) {
     chip("download-chip", "bad", "failed");
@@ -576,14 +592,16 @@ function renderDownloadStep(backup) {
     chip("download-chip", "idle", "needs a session");
     $("download-note").textContent = "Authorise a playback session above, or tick dry run to see the plan first.";
   } else if (blocked) {
-    chip("download-chip", "idle", summary ? "no ffmpeg" : "needs an export");
+    chip("download-chip", "idle", backup.ffmpeg ? "needs a snapshot" : "no ffmpeg");
     $("download-note").textContent = blocked;
   } else if (report) {
     chip("download-chip", report.failed > 0 ? "bad" : report.stopped ? "warn" : "good", report.stopped ? "stopped" : "done");
     $("download-note").textContent = describeReport(report, request, backup);
   } else {
-    chip("download-chip", "idle", "idle");
-    $("download-note").textContent = `Writing to ${backup.libraryDir}. A dry run contacts nothing.`;
+    chip("download-chip", "idle", backup.defaults.onSchedule ? "on the schedule" : "idle");
+    $("download-note").textContent = backup.defaults.onSchedule
+      ? `Runs on the sync schedule and writes to ${backup.libraryDir}. Starting one here does the same thing now.`
+      : `Writing to ${backup.libraryDir}. A dry run contacts nothing.`;
   }
 
   readout(
@@ -726,7 +744,11 @@ function describeReport(report, request, backup) {
     parts.push(`Replaced ${plural(report.upgraded, "file")} (${from.lossy ?? 0} lossy, ${from.lossless ?? 0} lossless) — old copies are in DATA_DIR/replaced.`);
   }
   if (request?.upgrade && report.alreadyBest > 0) {
-    parts.push(`${report.alreadyBest} were already as good as TIDAL's copy.`);
+    parts.push(
+      `${report.alreadyBest} were already as good as TIDAL's copy — including any where that ` +
+        "only became clear once the replacement was on disk, which is remembered so they are " +
+        "not fetched again.",
+    );
   }
 
   const tiers = report.skippedByTier;
@@ -802,11 +824,6 @@ async function action(noteId, run) {
 $("auth-button").addEventListener("click", () => {
   $("auth-button").disabled = true;
   void action("auth-note", () => post("/api/backup/login"));
-});
-
-$("export-button").addEventListener("click", () => {
-  $("export-button").disabled = true;
-  void action("export-note", () => post("/api/backup/export"));
 });
 
 $("download-button").addEventListener("click", () => {

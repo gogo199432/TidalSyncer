@@ -26,6 +26,17 @@ const QUALITY_FORMATS: Record<Quality, { formats: string[]; extension: string; d
 /** A file smaller than this is a truncated fetch or an error page, never real audio. */
 const MIN_AUDIO_BYTES = 100 * 1024;
 
+/**
+ * Suffixes for the two transient files a download writes into the library directory: the
+ * assembled segments, and the demuxed result waiting to be renamed into place.
+ *
+ * Named so that nothing else could plausibly be called this. They carry no audio extension,
+ * so neither the library index nor whatever is serving the library picks them up, and
+ * `sweepInterrupted` can clear them after a hard kill without ever risking a real file.
+ */
+export const RAW_SUFFIX = ".tidalsyncer-raw";
+export const PART_SUFFIX = ".tidalsyncer-part";
+
 export class DownloadError extends Error {}
 
 /** Raised when the account is not entitled to the full track, so callers can count it apart. */
@@ -102,8 +113,13 @@ export async function downloadTrack(
     const target = replaceExtension(destination, extension);
     await mkdir(dirname(target), { recursive: true });
 
-    const raw = demux ? `${target}.${process.pid}.m4a` : `${target}.${process.pid}.part`;
-    const demuxed = `${target}.${process.pid}.part`;
+    // Deliberately not `.m4a`/`.part`: a run killed mid-track leaves these behind, and the
+    // next run has to be able to recognise its own litter without any chance of mistaking a
+    // real file for it. `Live.2001.m4a` is a plausible thing to find in a library; the raw
+    // segments used to be named exactly like that. See `sweepInterrupted` in download.ts.
+    // ffmpeg probes its input rather than trusting the extension, so the demux is unaffected.
+    const raw = `${target}.${process.pid}${RAW_SUFFIX}`;
+    const demuxed = `${target}.${process.pid}${PART_SUFFIX}`;
     try {
       const bytes = await writeSegments(parsed, raw);
       if (bytes < MIN_AUDIO_BYTES) {

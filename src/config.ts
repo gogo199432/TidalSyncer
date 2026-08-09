@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import type { LogLevel } from "./logger.ts";
 
 export type Config = {
@@ -70,6 +70,14 @@ export type Config = {
    */
   replacedDir: string;
   /**
+   * How long a retired file is kept in `replacedDir` before a download prunes it. Zero keeps
+   * them for ever, which is what you want only if you are pruning by hand.
+   *
+   * A window rather than a schedule on purpose: "empty it every Sunday" would give a file
+   * retired on Saturday night a day of undo, where this gives every file the same week.
+   */
+  replacedRetentionDays: number;
+  /**
    * Mirror the TIDAL collection's tracks back to ListenBrainz as loved recordings.
    * Additive only: a track dropped from the collection keeps its ListenBrainz love.
    */
@@ -78,6 +86,15 @@ export type Config = {
   dataDir: string;
   /** Cron expression used by `daemon`. */
   schedule: string;
+  /**
+   * Run the backup — snapshot the catalogue, then fill `libraryDir` from it — on the same
+   * schedule as the playlist sync, right after it.
+   *
+   * On by default, but it can only actually do anything once `download` is set up: a daemon
+   * with no `deviceClientId` or no stored playback session skips it and says why, so this
+   * costs nothing on an install that only mirrors playlists.
+   */
+  backupOnSchedule: boolean;
   timezone: string;
   /**
    * Status page served by `daemon`: sync stats, the next scheduled run, and a button that
@@ -137,6 +154,14 @@ function integer(key: string, fallback: number, min: number, max: number): numbe
  */
 const RECOMMENDATION_SOURCE_PATCHES = ["weekly-jams", "weekly-exploration", "daily-jams"];
 
+/** True when `path` is neither `root` itself nor anywhere beneath it. */
+function isOutside(path: string, root: string): boolean {
+  const inside = relative(root, path);
+  // "" is `root` itself. Anything that has to climb out, or that `relative` could not express
+  // as a relative path at all, is elsewhere.
+  return inside !== "" && (inside.startsWith("..") || isAbsolute(inside));
+}
+
 function list(key: string, fallback: string[]): string[] {
   const value = process.env[key]?.trim();
   if (!value) return fallback;
@@ -191,6 +216,26 @@ export function loadConfig(): Config {
     );
   }
 
+  const libraryDir = resolve(optional("LIBRARY_DIR", "./library"));
+  // Resolved only when set, so "" stays "" and means delete rather than resolving to cwd.
+  const replacedDir = process.env.TIDAL_REPLACED_DIR?.trim()
+    ? resolve(process.env.TIDAL_REPLACED_DIR.trim())
+    : process.env.TIDAL_REPLACED_DIR === ""
+      ? ""
+      : resolve(optional("DATA_DIR", "./data"), "replaced");
+
+  // Retiring a file *into* the library is the one way an upgrade leaves you with two copies
+  // of a track: the replacement under its own name, and the file it replaced still sitting
+  // where a scanner will index it. Nothing downstream can detect that, so refuse it here.
+  if (replacedDir && !isOutside(replacedDir, libraryDir)) {
+    throw new ConfigError(
+      `TIDAL_REPLACED_DIR (${replacedDir}) is inside LIBRARY_DIR (${libraryDir}). Upgraded ` +
+        "files are moved there, so your library would end up holding both the new copy and " +
+        "the one it replaced. Point it somewhere outside, or set it to an empty string to " +
+        "delete replaced files instead.",
+    );
+  }
+
   return {
     listenBrainzUser: required("LISTENBRAINZ_USER"),
     listenBrainzApiUrl: optional("LISTENBRAINZ_API_URL", "https://api.listenbrainz.org"),
@@ -209,19 +254,16 @@ export function loadConfig(): Config {
       deviceClientSecret: optional("TIDAL_DEVICE_CLIENT_SECRET", ""),
       downloadDelayMs: integer("TIDAL_DOWNLOAD_DELAY_MS", 3000, 0, 600_000),
     },
-    libraryDir: resolve(optional("LIBRARY_DIR", "./library")),
+    libraryDir,
     downloadQuality: downloadQuality as Config["downloadQuality"],
     skipTier: skipTier as Config["skipTier"],
     upgrade: boolean("TIDAL_UPGRADE", false),
-    // Resolved only when set, so "" stays "" and means delete rather than resolving to cwd.
-    replacedDir: process.env.TIDAL_REPLACED_DIR?.trim()
-      ? resolve(process.env.TIDAL_REPLACED_DIR.trim())
-      : process.env.TIDAL_REPLACED_DIR === ""
-        ? ""
-        : resolve(optional("DATA_DIR", "./data"), "replaced"),
+    replacedDir,
+    replacedRetentionDays: integer("TIDAL_REPLACED_RETENTION_DAYS", 7, 0, 3650),
     syncFavorites,
     dataDir: resolve(optional("DATA_DIR", "./data")),
     schedule: optional("SYNC_SCHEDULE", "0 */6 * * *"),
+    backupOnSchedule: boolean("BACKUP_ON_SCHEDULE", true),
     timezone: optional("TZ", "UTC"),
     dashboard: {
       enabled: boolean("DASHBOARD_ENABLED", true),

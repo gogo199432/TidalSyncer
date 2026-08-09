@@ -129,6 +129,12 @@ describe("backup status", () => {
     expect(backup.libraryDir).toBe(config.libraryDir);
   });
 
+  test("says whether the daemon will back up on its own", async () => {
+    // Defaulted on, so an install that has downloading set up gets it without opting in —
+    // and the page has to be able to say so, because nothing else would.
+    expect((await backupStatus()).defaults.onSchedule).toBe(true);
+  });
+
   test("summarises the export already on disk, without shipping the whole manifest", async () => {
     const exported = (await backupStatus()).export;
     expect(exported.summary.stats.uniqueTracks).toBe(3);
@@ -148,11 +154,16 @@ describe("backup status", () => {
 
 describe("backup endpoints", () => {
   test("rejects a GET", async () => {
-    expect((await get("/api/backup/export")).status).toBe(405);
+    expect((await get("/api/backup/download")).status).toBe(405);
   });
 
   test("404s an unknown action", async () => {
     expect((await post("/api/backup/nonsense")).status).toBe(404);
+  });
+
+  // Exporting is a phase of the download now, not something to press separately.
+  test("no longer offers an export of its own", async () => {
+    expect((await post("/api/backup/export")).status).toBe(404);
   });
 
   test("refuses login while downloading is unconfigured", async () => {
@@ -190,6 +201,18 @@ describe("backup endpoints", () => {
     expect(backup.download.report.downloaded).toBe(2);
     expect(backup.download.report.upgraded).toBe(0);
     expect(backup.download.report.stopped).toBe(false);
+  });
+
+  test("a dry run leaves the snapshot alone, having promised to contact nothing", async () => {
+    const before = (await backupStatus()).export.summary.exportedAt;
+
+    expect((await post("/api/backup/download", { dryRun: true })).status).toBe(202);
+    const backup = await settle();
+
+    // A real run would have re-snapshotted first, which is the whole point of there being no
+    // export button — but that reaches TIDAL, and a dry run must not.
+    expect(backup.export.summary.exportedAt).toBe(before);
+    expect(backup.export.lastRunAt).toBeNull();
   });
 
   test("scopes a dry run to one exported playlist", async () => {

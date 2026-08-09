@@ -132,8 +132,9 @@ Two things worth knowing:
   serve nothing at all.
 - **A manual run cannot overlap a scheduled one.** Both go through the same runner, and a
   trigger that arrives mid-run is logged and ignored rather than queued — two concurrent
-  runs would write the same TIDAL playlists. Export and download share a second runner with
-  the same rule, since a download reads the file an export rewrites.
+  runs would write the same TIDAL playlists. The backup half has a second runner with the
+  same rule, and since a download can run for hours, a tick that lands on top of one is
+  simply skipped and picked up by the following tick.
 
 The page it renders is also the whole API, if you would rather script it:
 
@@ -143,7 +144,7 @@ curl -X POST localhost:8081/api/run        # 202 accepted, or 409 if one is runn
 curl -X POST 'localhost:8081/api/run?force=true'   # re-mirror even with no new edition
 
 curl -X POST localhost:8081/api/backup/login    # returns the device code to display
-curl -X POST localhost:8081/api/backup/export
+# Snapshots the catalogue, then downloads from it. There is no separate export endpoint.
 curl -X POST localhost:8081/api/backup/download \
   -H 'content-type: application/json' \
   -d '{"dryRun":true,"quality":"lossless","skipTier":"album-agnostic","limit":5}'
@@ -347,7 +348,10 @@ LISTENBRAINZ_USER=... TIDAL_CLIENT_ID=... TIDAL_CLIENT_SECRET=... bun run sync
 
 ## Backing up
 
-Two separate things, in two separate commands, because they carry very different weight.
+Two things — a snapshot of your curation, and the audio itself — but only one of them is
+something you have to remember to do. `download` always takes a fresh snapshot first, and the
+daemon runs the pair on `SYNC_SCHEDULE` right after each playlist sync. `export` is still its
+own command for when the snapshot is all you want.
 
 ### `export` — your curation
 
@@ -377,7 +381,13 @@ bun run download --dry-run      # see what it would fetch
 bun run download --limit=5      # start small
 ```
 
-Reads the export, then fetches `GET /v2/trackManifests/{id}` with `manifestType=HLS`,
+Takes a fresh snapshot — the same one `export` writes — and then works from it. That ordering
+is not optional, because a download reads nothing else: skipping it would fetch your
+collection as it stood the last time somebody ran `export` by hand. `--dry-run` is the
+exception, since it promises to contact nothing; it plans against the snapshot already on
+disk, which also keeps it usable before `download-login` has ever been run.
+
+Then fetches `GET /v2/trackManifests/{id}` with `manifestType=HLS`,
 `uriScheme=HTTPS`, `usage=DOWNLOAD`, pulls the plain HLS segments, and demuxes the FLAC out
 of its MP4 container with `ffmpeg -c copy` (so it stays lossless — the bytes are moved, not
 re-encoded).
@@ -470,25 +480,73 @@ depending on the file, and `.flac` says nothing about whether it is 16 or 24 bit
 | `lossless` | FLAC, ALAC, WAV, APE, WavPack at CD depth |
 | `hires` | any of those at 24-bit, or above 48 kHz |
 
-Two things keep this honest:
+Four things keep this honest:
 
 - **The comparison is against what would actually be downloaded** — the best TIDAL offers,
   capped by `--quality`. A `lossless` run never claims it is about to upgrade a CD-quality
   FLAC to hi-res and then writes 16-bit. Ask for `--quality=hires` if you want those.
 - **A file that cannot be read is left alone.** `ffprobe` failing is not evidence that
   TIDAL's copy is better, and overwriting is the wrong way to resolve the doubt.
+- **The replacement is probed before it is committed.** Nothing is retired on the strength of
+  what the catalogue promised; the old file is parked, the new one is fetched and read, and
+  only a genuine improvement gets to keep the slot. Anything else is discarded and the
+  original goes straight back.
+- **A disappointment is remembered.** `DATA_DIR/upgrades.json` records what each run aimed at
+  and what actually landed.
+
+Those last two are what stop `--quality=hires` becoming a treadmill. `mediaTags` describe the
+*catalogue*, not your subscription: a track TIDAL lists as `HIRES_LOSSLESS` comes back as
+plain 16-bit FLAC on an account without the hi-res tier — no error, no preview, just a smaller
+file. The old check compared the tags against the file on disk, so it saw an upgrade, fetched
+it, retired a perfectly good FLAC for a byte-for-byte equal one — and, since nothing about the
+track ever changes, did the same thing on the next run, and the next. Now the fetch has to
+prove itself, and the verdict is written down: the track is counted as *already best*, and the
+next run does not ask again unless it is aiming higher or the file on disk has since got worse.
+Delete `upgrades.json` to make it forget.
 
 `DOLBY_ATMOS` is ignored where TIDAL offers it: it is a different mix, not a better one, and
 this downloads stereo.
 
 **Where the old file goes.** `TIDAL_REPLACED_DIR` (default `DATA_DIR/replaced`) receives it,
-mirroring its path in the library. Nothing is ever removed before the replacement is on disk,
-and if the download fails the original is put straight back. Set it to an empty string to
-delete instead — a deliberate choice, not a default, because it forecloses the undo.
+mirroring its path in the library. Nothing is ever removed before the replacement is on disk
+*and* confirmed to be better; if the download fails, or comes back no better, the original is
+put straight back. Set it to an empty string to delete instead — a deliberate choice, not a
+default, because it forecloses the undo.
 
 Mind the size. Replacing most of a library retires most of a library: 550 lossy files is
 somewhere around 2 GB, and it has to land somewhere with room. That is a poor fit for a small
 state volume, so point `TIDAL_REPLACED_DIR` at real storage or accept the deletion.
+
+**You never end up with two copies.** An upgrade moves the old file out of the library before
+the new one takes its name, and if it cannot move it — no `TIDAL_REPLACED_DIR`, a full disk,
+another filesystem it also cannot copy to — it deletes it rather than leaving a duplicate
+behind for you to find later. There is nothing to prune by hand. The one arrangement that
+would defeat that is a `TIDAL_REPLACED_DIR` *inside* `LIBRARY_DIR`, which puts the retired
+file straight back in front of your music server; that is refused at startup with a message
+saying so, rather than discovered a thousand tracks later.
+
+**How long the undo lasts.** `TIDAL_REPLACED_RETENTION_DAYS` (default `7`) is how long a
+retired file stays before a download deletes it. Set it to `0` to keep them for ever and prune
+by hand.
+
+That is a window rather than a weekly wipe, and the difference matters: emptying the directory
+every Sunday would give a file retired on Saturday night one day of undo and one retired on
+Monday a full seven. This way every file gets the same week, whenever it arrived. The clock
+starts when the file is *retired*, not when it was recorded — a rip from 2014 would otherwise
+be a decade past its window the instant something replaced it — so each one is stamped as it
+moves. Empty parent folders go with the files; the directory itself stays. Pruning runs at the
+start of every real download, which on the daemon means every scheduled tick, and never on a
+dry run.
+
+**Leftovers.** A run that finishes — successfully, with a failed track, or stopped by hand —
+leaves nothing behind. A run that is *killed* mid-track is the exception, and there are two
+answers to it. The daemon now stops gracefully: SIGTERM stops the schedule and asks the
+download to finish the track it is on, waiting up to 25 seconds (hence `stop_grace_period:
+30s` in the compose file — Docker's default 10s would cut it short). A second signal exits at
+once. And because SIGKILL never asks, the next run also sweeps: the transients are named so
+that nothing else could be called this (`.upgrading-<pid>-…`, `….<pid>.tidalsyncer-raw`,
+`….<pid>.tidalsyncer-part`) and carry no audio extension, so neither the library index nor
+your music server ever sees one. A dry run does not sweep, having promised to change nothing.
 
 ### Doing it from the browser
 
@@ -500,11 +558,14 @@ to approve it — the same flow as `download-login`, but the daemon does the wai
 works unchanged inside a container with no terminal attached. The step says `off` instead if
 `TIDAL_DEVICE_CLIENT_ID` is unset.
 
-**2 · Export the catalogue.** Runs the same snapshot as `bun run export` and shows what came
-back: playlists, favourites, how many tracks carry an ISRC, how many were tombstoned.
+**2 · Catalogue snapshot.** What the last snapshot found: playlists, favourites, how many
+tracks carry an ISRC, how many were tombstoned. There is nothing to press — it is a phase of
+the run below, taken fresh every time, because a download reads it and a stale one fetches a
+stale collection.
 
-**3 · Download audio.** Source (the collection, or any exported playlist), quality, skip
-tier and a limit, plus **dry run** (ticked by default) and **upgrade**.
+**3 · Sync & download.** Source (the collection, or any exported playlist), quality, skip
+tier and a limit, plus **dry run** (ticked by default) and **upgrade**. One button, both
+phases: the chip reads *snapshotting*, then *running*.
 
 The bar is stacked rather than a single fill, because how far along a run is matters less
 than what it is producing: downloads, upgrades, skips, and failures each take their own
@@ -518,11 +579,28 @@ library they are most of the list and none of the news), and when anything fails
 **N failed** control filters straight to those rather than making you scroll past the
 successes. **Stop** finishes the current track and then stops.
 
-The steps gate each other honestly rather than just greying out: a download says *needs an
-export* until one exists, *needs a session* when it would have to reach TIDAL without one,
-and warns if `ffmpeg` is missing from `PATH` (FLAC arrives inside an MP4 container and cannot
-be unwrapped without it, though the AAC tiers still work). A dry run stays available
-throughout, since it only reads the export and the library.
+The steps gate each other honestly rather than just greying out: a download says *needs a
+session* when it would have to reach TIDAL without one, *needs a snapshot* when a dry run has
+nothing to plan against, and warns if `ffmpeg` is missing from `PATH` (FLAC arrives inside an
+MP4 container and cannot be unwrapped without it, though the AAC tiers still work). A dry run
+stays available throughout, since it only reads the snapshot and the library.
+
+### Leaving it to the schedule
+
+The daemon runs the whole backup — snapshot, then download — on `SYNC_SCHEDULE`, immediately
+after each playlist sync. One schedule, everything on it.
+
+It is on by default and costs nothing on an install that never set downloading up: with no
+`TIDAL_DEVICE_CLIENT_ID`, no stored playback session, or no `ffmpeg` behind a FLAC quality, it
+logs why it is skipping and leaves the tick alone. It uses the configured defaults —
+`TIDAL_DOWNLOAD_QUALITY`, `TIDAL_SKIP_TIER`, `TIDAL_UPGRADE` — against your collection, with
+no limit. Set `BACKUP_ON_SCHEDULE=false` to keep it manual.
+
+A collection takes hours at `TIDAL_DOWNLOAD_DELAY_MS`, so ticks that land on a run in progress
+are skipped rather than queued, and the run continues; the next tick picks up wherever it got
+to, since anything already on disk is skipped. It deliberately does *not* run on startup —
+a container that restarts often would spend all its time beginning a download it never
+finishes — so the first one is at most one `SYNC_SCHEDULE` away.
 
 ## Commands
 
@@ -532,10 +610,10 @@ throughout, since it only reads the export and the library.
 | `bun run sync` | Mirror once (`--force` re-mirrors even with no new edition), then favourites if enabled |
 | `bun run favorites` | Only mirror the TIDAL collection back to ListenBrainz |
 | `bun run status` | Show what is mirrored, without contacting TIDAL (`--unresolved` names the favourites MusicBrainz could not place) |
-| `bun run daemon` | Sync on startup, then on `SYNC_SCHEDULE`; serves the dashboard too |
+| `bun run daemon` | Sync on startup, then sync + back up on `SYNC_SCHEDULE`; serves the dashboard too |
 | `bun run export` | Snapshot your curation to `DATA_DIR/export` (JSON + `.m3u8`) |
 | `bun run download-login` | Authorise the playback session `download` needs (separate from `login`) |
-| `bun run download` | Fetch audio for exported tracks into `LIBRARY_DIR` |
+| `bun run download` | Snapshot the catalogue, then fetch audio from it into `LIBRARY_DIR` |
 | `bun test` | Run tests |
 | `bun run typecheck` | `tsc --noEmit` |
 
@@ -566,7 +644,9 @@ src/
   sync.ts           ListenBrainz -> TIDAL: edition selection, mirroring, state
   favorites.ts      TIDAL -> ListenBrainz: collection to loved recordings
   runner.ts         one run at a time, shared by the CLI, the cron tick and the dashboard
-  backup.ts         device login / export / download as jobs the dashboard can drive
+  backup.ts         device login, and snapshot-then-download as one schedulable job
+  quality.ts        ffprobe-backed tiering, for deciding what counts as an upgrade
+  upgrades.ts       what each upgrade attempt actually got, so none is repeated for ever
   store.ts          atomic JSON state + run history + lookup cache
   logger.ts
   dashboard/

@@ -15,19 +15,26 @@ import { DeviceNotAuthenticatedError, DeviceSession } from "./tidal/device-auth.
 import type { Quality } from "./tidal/download.ts";
 
 /**
- * The backup side of the daemon — device login, `export` and `download` — held as state a
- * long-lived process can expose and a browser can drive.
+ * The backup side of the daemon — device login, then the snapshot-and-download run — held as
+ * state a long-lived process can expose and a browser can drive.
  *
- * The CLI runs each of these once and exits, which is fine at a terminal but useless from a
- * page: the device flow needs a code shown to the user *while* the daemon waits for them to
- * approve it, and a download of a whole collection runs for hours and has to be watchable
- * and stoppable. So all three become jobs with a snapshot, mirroring `SyncRunner`.
+ * The CLI runs these once and exits, which is fine at a terminal but useless from a page: the
+ * device flow needs a code shown to the user *while* the daemon waits for them to approve it,
+ * and a download of a whole collection runs for hours and has to be watchable and stoppable.
+ * So they become jobs with a snapshot, mirroring `SyncRunner`.
  *
- * Only one job runs at a time. Export writes `export.json` and download reads it, so letting
- * them overlap would have a download working from a file being rewritten underneath it.
+ * Export and download are one job rather than two buttons. A download works entirely from
+ * `export.json`, so an old snapshot means fetching an old collection — the two were never
+ * independently useful, and leaving the ordering to whoever was looking at the page was a
+ * way to get it wrong. Only one job runs at a time for the same reason: export rewrites the
+ * file that download reads.
  */
 
+/** The phase a backup run is in. A run passes through both, in this order. */
 export type BackupJob = "export" | "download";
+
+/** What started a backup run — the dashboard, or the daemon's schedule. */
+export type BackupTrigger = "manual" | "schedule";
 
 export type AuthState =
   /** No TIDAL_DEVICE_CLIENT_ID, so downloading is switched off entirely. */
@@ -61,7 +68,14 @@ export type BackupSnapshot = {
   libraryDir: string;
   /** FLAC arrives inside an MP4 container, so without ffmpeg only the AAC tiers work. */
   ffmpeg: boolean;
-  defaults: { quality: Quality; skipTier: MatchTier; delayMs: number; upgrade: boolean };
+  defaults: {
+    quality: Quality;
+    skipTier: MatchTier;
+    delayMs: number;
+    upgrade: boolean;
+    /** Whether the daemon starts a backup on every scheduled tick. */
+    onSchedule: boolean;
+  };
   auth: {
     state: AuthState;
     /** Where the user must go to approve the device. Only while `pending`. */
@@ -70,8 +84,10 @@ export type BackupSnapshot = {
     expiresAt?: string;
     error?: string;
   };
+  /** The phase of the run in flight — a run snapshots first, then downloads. */
   running: BackupJob | null;
   runningSince: string | null;
+  runningTrigger: BackupTrigger | null;
   /** A stop has been asked for and the run is finishing its current track. */
   stopping: boolean;
   export: {
@@ -98,7 +114,7 @@ export type BackupSnapshot = {
 const MAX_EVENTS = 5000;
 
 export class BackupRunner {
-  private active: { job: BackupJob; startedAt: string } | undefined;
+  private active: { job: BackupJob; startedAt: string; trigger: BackupTrigger } | undefined;
   private controller: AbortController | undefined;
 
   private authState: AuthState = "signed-out";
@@ -157,6 +173,7 @@ export class BackupRunner {
         skipTier: this.config.skipTier,
         delayMs: this.config.tidal.downloadDelayMs,
         upgrade: this.config.upgrade,
+        onSchedule: this.config.backupOnSchedule,
       },
       auth: {
         state: this.authState,
@@ -165,6 +182,7 @@ export class BackupRunner {
       },
       running: this.active?.job ?? null,
       runningSince: this.active?.startedAt ?? null,
+      runningTrigger: this.active?.trigger ?? null,
       stopping: Boolean(this.controller?.signal.aborted),
       export: {
         summary: this.exportSummary,
@@ -232,37 +250,25 @@ export class BackupRunner {
     return pending;
   }
 
-  /** Starts an export. Returns false if another backup job is already running. */
-  startExport(): boolean {
-    if (this.active) return false;
-
-    this.active = { job: "export", startedAt: new Date().toISOString() };
-    this.exportError = null;
-
-    void (async () => {
-      try {
-        const result = await runExport(this.config);
-        logExportReport(result);
-        this.exportSummary = summarize(result.manifest);
-      } catch (error) {
-        this.exportError = error instanceof Error ? error.message : String(error);
-        log.error("Export failed", { error: this.exportError });
-      } finally {
-        this.exportRanAt = new Date().toISOString();
-        this.active = undefined;
-      }
-    })();
-
-    return true;
-  }
-
-  /** Starts a download. Returns false if another backup job is already running. */
-  startDownload(request: DownloadRequest): boolean {
+  /**
+   * Starts a backup: snapshot the catalogue, then fill the library from it. Returns false if
+   * a backup is already running.
+   *
+   * The snapshot is not optional and not a separate button. `runDownload` reads nothing but
+   * `export.json`, so skipping it means fetching whatever the collection looked like the last
+   * time somebody remembered to press export.
+   *
+   * A dry run is the exception: it promises to contact nothing, and taking a fresh snapshot
+   * would both break that promise and rewrite `export.json` on a run that was supposed to
+   * change nothing. It plans against the snapshot already on disk.
+   */
+  startBackup(request: DownloadRequest, trigger: BackupTrigger = "manual"): boolean {
     if (this.active) return false;
 
     const controller = new AbortController();
     this.controller = controller;
-    this.active = { job: "download", startedAt: new Date().toISOString() };
+    const startedAt = new Date().toISOString();
+    this.active = { job: request.dryRun ? "download" : "export", startedAt, trigger };
     this.downloadRequest = request;
     this.downloadReport = null;
     this.downloadError = null;
@@ -272,6 +278,12 @@ export class BackupRunner {
 
     void (async () => {
       try {
+        if (!request.dryRun) await this.takeSnapshot();
+
+        // A stop during the snapshot has nothing to abort mid-flight, so it lands here: the
+        // download starts, sees the aborted signal on its first track and reports `stopped`.
+        this.active = { job: "download", startedAt, trigger };
+
         const report = await runDownload(this.config, {
           ...request,
           signal: controller.signal,
@@ -286,7 +298,7 @@ export class BackupRunner {
         this.downloadReport = report;
       } catch (error) {
         this.downloadError = error instanceof Error ? error.message : String(error);
-        log.error("Download failed", { error: this.downloadError });
+        log.error("Backup failed", { trigger, error: this.downloadError });
 
         // A dead refresh token clears the stored session, so re-read it rather than leaving
         // the page claiming to be signed in when the next run would fail the same way.
@@ -305,12 +317,73 @@ export class BackupRunner {
     return true;
   }
 
-  /** Asks a running download to stop after the current track. No-op for anything else. */
+  /**
+   * The daemon's scheduled backup, with the configured defaults and no limit.
+   *
+   * Skips rather than fails when downloading is not set up. An install that only mirrors
+   * playlists has no device client id and no playback session, and a schedule that logged an
+   * error every six hours about a feature nobody switched on would be noise.
+   */
+  startScheduled(): boolean {
+    if (!this.config.backupOnSchedule) return false;
+
+    if (this.authState !== "authorised") {
+      log.debug("Skipping the scheduled backup", { reason: this.authState });
+      return false;
+    }
+
+    // FLAC arrives wrapped in MP4 and every single track would fail the demux. The run's
+    // consecutive-failure guard would catch it after five, but only after five.
+    const wantsFlac = this.config.downloadQuality === "hires" || this.config.downloadQuality === "lossless";
+    if (wantsFlac && !Bun.which("ffmpeg")) {
+      log.warn("Skipping the scheduled backup: TIDAL_DOWNLOAD_QUALITY needs ffmpeg, which is not on PATH", {
+        quality: this.config.downloadQuality,
+      });
+      return false;
+    }
+
+    return this.startBackup(
+      {
+        quality: this.config.downloadQuality,
+        skipTier: this.config.skipTier,
+        dryRun: this.config.dryRun,
+        upgrade: this.config.upgrade,
+      },
+      "schedule",
+    );
+  }
+
+  /**
+   * Asks a running backup to stop. It takes effect at the next track boundary, so a stop
+   * during the snapshot phase is honoured the moment the download would have started.
+   */
   stop(): boolean {
-    if (this.active?.job !== "download" || !this.controller) return false;
-    log.info("Download stop requested from the dashboard");
+    if (!this.active || !this.controller) return false;
+    log.info("Backup stop requested", { phase: this.active.job });
     this.controller.abort();
     return true;
+  }
+
+  /**
+   * The snapshot phase. A failure here is recorded but not fatal: `runDownload` will either
+   * work from the previous `export.json` — stale, and said so in the log — or raise its own
+   * much clearer "no export found" if there has never been one.
+   */
+  private async takeSnapshot(): Promise<void> {
+    this.exportError = null;
+
+    try {
+      const result = await runExport(this.config);
+      logExportReport(result);
+      this.exportSummary = summarize(result.manifest);
+    } catch (error) {
+      this.exportError = error instanceof Error ? error.message : String(error);
+      log.error("Catalogue snapshot failed; the download will use the previous one if there is one", {
+        error: this.exportError,
+      });
+    } finally {
+      this.exportRanAt = new Date().toISOString();
+    }
   }
 }
 

@@ -42,6 +42,92 @@ describe("source patch selection", () => {
   });
 });
 
+/**
+ * Upgrades move the file they replaced into TIDAL_REPLACED_DIR. Point that inside the
+ * library and every upgrade leaves your music server showing two copies of the track — the
+ * one thing this tool cannot detect or clean up for you, so it is refused up front.
+ */
+describe("TIDAL_REPLACED_DIR against LIBRARY_DIR", () => {
+  afterEach(() => {
+    delete process.env.LIBRARY_DIR;
+    delete process.env.TIDAL_REPLACED_DIR;
+    delete process.env.DATA_DIR;
+  });
+
+  test("refuses a retire directory inside the library", () => {
+    process.env.LIBRARY_DIR = "/srv/music";
+    process.env.TIDAL_REPLACED_DIR = "/srv/music/replaced";
+    expect(() => loadConfig()).toThrow(/inside LIBRARY_DIR/);
+  });
+
+  test("refuses the library itself", () => {
+    process.env.LIBRARY_DIR = "/srv/music";
+    process.env.TIDAL_REPLACED_DIR = "/srv/music";
+    expect(() => loadConfig()).toThrow(/inside LIBRARY_DIR/);
+  });
+
+  test("refuses it however the path is spelled", () => {
+    process.env.LIBRARY_DIR = "/srv/music";
+    process.env.TIDAL_REPLACED_DIR = "/srv/music/../music/old";
+    expect(() => loadConfig()).toThrow(/inside LIBRARY_DIR/);
+  });
+
+  test("accepts a sibling, which is what the defaults give you", () => {
+    process.env.LIBRARY_DIR = "/srv/music";
+    process.env.DATA_DIR = "/srv/data";
+    expect(loadConfig().replacedDir).toBe("/srv/data/replaced");
+  });
+
+  test("accepts a path that merely starts with the library's name", () => {
+    process.env.LIBRARY_DIR = "/srv/music";
+    process.env.TIDAL_REPLACED_DIR = "/srv/music-replaced";
+    expect(loadConfig().replacedDir).toBe("/srv/music-replaced");
+  });
+
+  test("has nothing to object to when replaced files are deleted instead", () => {
+    process.env.LIBRARY_DIR = "/srv/music";
+    process.env.TIDAL_REPLACED_DIR = "";
+    expect(loadConfig().replacedDir).toBe("");
+  });
+});
+
+describe("TIDAL_REPLACED_RETENTION_DAYS", () => {
+  afterEach(() => {
+    delete process.env.TIDAL_REPLACED_RETENTION_DAYS;
+  });
+
+  test("keeps a replaced file for a week by default", () => {
+    expect(loadConfig().replacedRetentionDays).toBe(7);
+  });
+
+  test("zero keeps them for ever, for pruning by hand", () => {
+    process.env.TIDAL_REPLACED_RETENTION_DAYS = "0";
+    expect(loadConfig().replacedRetentionDays).toBe(0);
+  });
+
+  test("rejects a value that is not a whole number of days", () => {
+    process.env.TIDAL_REPLACED_RETENTION_DAYS = "1.5";
+    expect(() => loadConfig()).toThrow(/must be an integer/);
+    process.env.TIDAL_REPLACED_RETENTION_DAYS = "-1";
+    expect(() => loadConfig()).toThrow(/must be an integer/);
+  });
+});
+
+describe("BACKUP_ON_SCHEDULE", () => {
+  afterEach(() => {
+    delete process.env.BACKUP_ON_SCHEDULE;
+  });
+
+  test("is on by default — the daemon backs up on the same tick it syncs", () => {
+    expect(loadConfig().backupOnSchedule).toBe(true);
+  });
+
+  test("can be switched off to keep backups something you start by hand", () => {
+    process.env.BACKUP_ON_SCHEDULE = "false";
+    expect(loadConfig().backupOnSchedule).toBe(false);
+  });
+});
+
 describe("validation", () => {
   test("requires a ListenBrainz user", () => {
     delete process.env.LISTENBRAINZ_USER;

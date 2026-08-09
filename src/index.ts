@@ -24,15 +24,18 @@ Commands:
   sync       Mirror the ListenBrainz playlists into TIDAL, then favourites back (once)
   favorites  Only mirror the TIDAL collection back to ListenBrainz as loved recordings
   status     Show what is currently mirrored, without contacting TIDAL
-  daemon     Sync on a schedule (SYNC_SCHEDULE, default every 6 hours), and serve the
-             status dashboard on DASHBOARD_PORT (default 8081)
+  daemon     Sync on a schedule (SYNC_SCHEDULE, default every 6 hours), then back up on
+             the same tick, and serve the status dashboard on DASHBOARD_PORT (default
+             8081). Set BACKUP_ON_SCHEDULE=false to leave the backup half to you
 
   export     Write a portable snapshot of your TIDAL curation to DATA_DIR/export:
              every owned playlist and the collection, as JSON plus .m3u8 files,
              with ISRCs so it stays resolvable after tracks are delisted
   download-login
              Authorise a playback session for 'download' (separate from 'login')
-  download   Fetch audio for exported tracks into LIBRARY_DIR
+  download   Snapshot the catalogue as 'export' does, then fetch audio for the tracks
+             in it into LIBRARY_DIR. A --dry-run plans against the existing snapshot
+             instead, contacting nothing
 
 Options:
   --force       With 'sync' or 'daemon': re-mirror even if ListenBrainz has no new edition
@@ -51,6 +54,27 @@ Options:
 Mirroring favourites back needs SYNC_FAVORITES=true and a LISTENBRAINZ_TOKEN.
 Downloading needs TIDAL_DEVICE_CLIENT_ID and ffmpeg on PATH.
 `;
+
+/**
+ * How long a shutdown waits for a run in flight.
+ *
+ * Roughly one track plus room to finish writing it. There is no point going much beyond the
+ * container's `stop_grace_period` — 30s in this repo's compose file — because SIGKILL arrives
+ * when that expires and a longer wait would only be waiting to be killed.
+ */
+const SHUTDOWN_GRACE_MS = 25_000;
+
+/** Resolves once `done()` holds, or once the budget is spent. True if it was the former. */
+async function settle(done: () => boolean, budgetMs: number): Promise<boolean> {
+  const deadline = Date.now() + budgetMs;
+
+  while (!done()) {
+    if (Date.now() >= deadline) return false;
+    await Bun.sleep(250);
+  }
+
+  return true;
+}
 
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
@@ -216,6 +240,16 @@ async function commandDownload(config: Config, options: Parameters<typeof runDow
     return 64; // EX_USAGE
   }
 
+  // A download reads nothing but the export snapshot, so it is refreshed first rather than
+  // left to whenever `export` was last run by hand — otherwise this quietly fetches the
+  // collection as it stood then. A dry run promises to contact nothing, so it is the one
+  // case that plans against the snapshot already on disk.
+  if (!options.dryRun) {
+    await initAuth(config);
+    await requireUserCredentials();
+    logExportReport(await runExport(config));
+  }
+
   const report = await runDownload(config, options);
   logDownloadReport(report);
   return report.failed > 0 ? 1 : 0;
@@ -231,15 +265,19 @@ async function commandDaemon(config: Config, force: boolean): Promise<number> {
   // when downloading is unconfigured, so the page can say so rather than omitting the panel.
   const backup = await BackupRunner.create(config);
 
-  // The runner ignores a trigger that arrives mid-run, so a cron tick landing on top of a
-  // long run — or of one started from the dashboard — is a no-op rather than a collision.
-  const job = new Cron(config.schedule, { timezone: config.timezone }, () => {
-    void runner.run("schedule", { force });
+  // One schedule drives everything: mirror the playlists, then snapshot the catalogue and
+  // fill the library from it. Both halves ignore a trigger that arrives mid-run, so a tick
+  // landing on top of a long one — a download of a whole collection runs for hours — is a
+  // no-op rather than a collision, and the backup is simply picked up by the following tick.
+  const job = new Cron(config.schedule, { timezone: config.timezone }, async () => {
+    await runner.run("schedule", { force });
+    backup.startScheduled();
   });
 
   log.info("Daemon started", {
     schedule: config.schedule,
     timezone: config.timezone,
+    backupOnSchedule: config.backupOnSchedule,
     nextRun: job.nextRun()?.toISOString() ?? "never",
   });
 
@@ -247,18 +285,50 @@ async function commandDaemon(config: Config, force: boolean): Promise<number> {
     ? startDashboard({ config, store, runner, backup, nextRun: () => job.nextRun() })
     : undefined;
 
-  // Sync immediately so a fresh container is useful without waiting for the first tick.
+  // Sync immediately so a fresh container is useful without waiting for the first tick. The
+  // backup deliberately does not join in here: it runs for hours, and a container that
+  // restarts — a redeploy, a crash loop — would spend all of its time restarting a download
+  // it never finishes. It waits for a tick, which is at most SYNC_SCHEDULE away.
   await runner.run("startup", { force });
   log.info("Waiting for next scheduled run", { nextRun: job.nextRun()?.toISOString() ?? "never" });
 
-  const shutdown = (signal: string) => {
+  let stopping = false;
+
+  /**
+   * Stops taking new work, asks what is in flight to wind up, and waits — briefly — for it.
+   *
+   * Exiting the instant a signal arrives used to strand a part-written track in the library
+   * on every restart, which is cheap to avoid: a download stops at the next *track* boundary
+   * rather than mid-file, so a few seconds of patience is usually the difference between a
+   * clean library and litter for the next run to sweep. It is only ever best-effort — the
+   * budget can expire, and SIGKILL does not ask — which is why the sweep exists regardless.
+   */
+  const shutdown = async (signal: string) => {
+    // A second signal is someone who has waited long enough. Honour it rather than making
+    // them reach for SIGKILL.
+    if (stopping) {
+      log.warn("Second signal; exiting now and leaving the current track to the next run", { signal });
+      process.exit(130);
+    }
+    stopping = true;
+
     log.info("Shutting down", { signal });
     job.stop();
-    void dashboard?.stop(true);
+    backup.stop();
+
+    if (runner.running || backup.running) {
+      log.info("Waiting for work in flight", { budgetMs: SHUTDOWN_GRACE_MS });
+      const finished = await settle(() => !runner.running && !backup.running, SHUTDOWN_GRACE_MS);
+      log.info(
+        finished ? "Work in flight finished" : "Gave up waiting; the next run will clear anything left behind",
+      );
+    }
+
+    await dashboard?.stop(true);
     process.exit(0);
   };
-  process.on("SIGINT", () => shutdown("SIGINT"));
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
   // Keep the process alive; croner holds its own timer but Bun needs a live handle.
   await new Promise<never>(() => {});

@@ -15,7 +15,13 @@ services:
     container_name: listenbrainz-tidal-sync
     restart: unless-stopped
 
-    # `daemon` syncs once on startup, then on SYNC_SCHEDULE.
+    # A backup stops at the next *track* boundary rather than mid-file, so give it a moment
+    # on SIGTERM: the alternative is a part-written file in the library on every restart. The
+    # daemon's own budget is 25s, so Docker's default 10s would cut it short. Nothing is lost
+    # if it does expire — the next run sweeps whatever was left.
+    stop_grace_period: 30s
+
+    # `daemon` syncs once on startup, then syncs and backs up on SYNC_SCHEDULE.
     command: ["daemon"]
 
     ports:
@@ -107,12 +113,25 @@ services:
       # Replace library files TIDAL has a better copy of, instead of skipping them — a
       # lossless copy of a track you only have as AAC. Off by default: it is the only mode
       # that touches files you already have.
+      #
+      # The replacement is probed before the old file is retired, and what each attempt
+      # actually got is recorded in DATA_DIR/upgrades.json — otherwise a hires run on an
+      # account without the hi-res tier re-fetches the same 16-bit FLAC on every tick.
       TIDAL_UPGRADE: "false"
 
       # Where an upgraded run puts the file it replaced. Empty deletes it instead.
       # Replacing most of a library retires most of a library, so this needs real room —
       # do not point it at a small state volume.
+      #
+      # It must be OUTSIDE LIBRARY_DIR, or your music server would index both the new copy
+      # and the one it replaced. The daemon refuses to start otherwise rather than letting
+      # you find out a thousand tracks later.
       TIDAL_REPLACED_DIR: /data/replaced
+
+      # How long a replaced file is kept before a download deletes it. A window rather than
+      # a weekly wipe, so every file gets the same week of undo whenever it was retired; the
+      # clock starts when it is replaced, not when it was recorded. 0 keeps them for ever.
+      TIDAL_REPLACED_RETENTION_DAYS: "7"
 
       # Pause between tracks. TIDAL answers a burst on the manifest endpoint with 429s and
       # eventually a captcha that deauthenticates the session — do not lower this casually.
@@ -121,6 +140,14 @@ services:
       # Cron expression for the daemon. Daily Jams refreshes daily, the weekly lists on
       # Mondays, so every 6 hours picks up a new edition promptly without being wasteful.
       SYNC_SCHEDULE: 0 */6 * * *
+
+      # Back up on the same tick, right after the playlist sync: snapshot the catalogue,
+      # then fill LIBRARY_DIR from it using the download settings above. Skipped, with a
+      # line saying why, when downloading is not set up — so this is harmless if you left
+      # TIDAL_DEVICE_CLIENT_ID empty. A collection takes hours; a tick that lands on a run
+      # still going is skipped rather than queued, and the next one carries on where it got
+      # to. Set to "false" to keep backups a thing you start by hand.
+      BACKUP_ON_SCHEDULE: "true"
 
       # Status dashboard served by the daemon: sync stats, the next scheduled run, a button
       # that starts one now, and the whole backup path — device login, export and download,

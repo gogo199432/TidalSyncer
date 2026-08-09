@@ -33,9 +33,9 @@ const ASSETS: Record<string, { file: string; type: string }> = {
  *   GET  /api/status           everything the page renders
  *   POST /api/run              trigger a sync now (409 while one is already running)
  *   POST /api/backup/login     start the TIDAL device flow; returns the code to display
- *   POST /api/backup/export    snapshot playlists and the collection to DATA_DIR/export
- *   POST /api/backup/download  fetch audio into LIBRARY_DIR
- *   POST /api/backup/stop      stop a running download after the current track
+ *   POST /api/backup/download  snapshot the catalogue to DATA_DIR/export, then fetch audio
+ *                              into LIBRARY_DIR from it
+ *   POST /api/backup/stop      stop a running backup after the current track
  *
  * There is no authentication. That already mattered — the page can start a sync — and it
  * matters more now: these endpoints spend a TIDAL session, write files, and display a device
@@ -111,22 +111,18 @@ async function handleBackup(deps: DashboardDeps, action: string, request: Reques
         return json({ error: message }, error instanceof BackupError ? 409 : 502);
       }
 
-    case "export":
-      return backup.startExport()
-        ? json({ started: true }, 202)
-        : json({ started: false, reason: "already-running" }, 409);
-
     case "download": {
       const parsed = await parseDownloadRequest(deps, request);
       if ("error" in parsed) return json({ error: parsed.error }, 400);
 
       // A dry run only reads the export and the library, so it stays available while signed
-      // out — that is exactly when you want to see how much there is to do.
+      // out — that is exactly when you want to see how much there is to do. It is also the
+      // one form of this run that does not re-snapshot the catalogue first.
       if (!parsed.request.dryRun && backup.snapshot().auth.state !== "authorised") {
         return json({ error: "No playback session. Authorise the device first." }, 409);
       }
 
-      return backup.startDownload(parsed.request)
+      return backup.startBackup(parsed.request)
         ? json({ started: true, request: parsed.request }, 202)
         : json({ started: false, reason: "already-running" }, 409);
     }

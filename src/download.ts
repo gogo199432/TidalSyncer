@@ -1,5 +1,6 @@
-import { mkdir, readFile, rename, rm } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import type { Dirent } from "node:fs";
+import { mkdir, readdir, readFile, rename, rm, rmdir, stat, utimes } from "node:fs/promises";
+import { basename, dirname, extname, join, relative } from "node:path";
 import type { Config } from "./config.ts";
 import type { ExportManifest, ExportedTrack } from "./export.ts";
 import { LibraryIndex, type MatchTier } from "./library.ts";
@@ -13,7 +14,15 @@ import {
   type QualityTier,
 } from "./quality.ts";
 import { DeviceNotAuthenticatedError, DeviceSession } from "./tidal/device-auth.ts";
-import { downloadTrack, DownloadError, EncryptedStreamError, type Quality } from "./tidal/download.ts";
+import {
+  downloadTrack,
+  DownloadError,
+  EncryptedStreamError,
+  PART_SUFFIX,
+  RAW_SUFFIX,
+  type Quality,
+} from "./tidal/download.ts";
+import { UpgradeLedger } from "./upgrades.ts";
 
 export type DownloadReport = {
   total: number;
@@ -31,7 +40,10 @@ export type DownloadReport = {
   upgraded: number;
   /** What was replaced, by the tier the old file was at. */
   upgradedFrom: Record<QualityTier, number>;
-  /** Matched files that were already as good as anything TIDAL would serve. */
+  /**
+   * Matched files that were already as good as anything TIDAL would serve — including the
+   * ones where that only became clear after fetching TIDAL's copy and finding it no better.
+   */
   alreadyBest: number;
 };
 
@@ -110,6 +122,19 @@ export type DownloadOptions = {
 const TIER_ORDER: MatchTier[] = ["exact", "album-agnostic", "loose"];
 
 /**
+ * The scratch name an upgrade fetches to, before it is known to be worth keeping.
+ *
+ * Leading dot so scanners ignore it, and no audio extension on the prefix so the library
+ * index does not either. `%d` is the pid of the run that created it.
+ */
+const UPGRADE_PREFIX = ".upgrading-";
+
+/** Matches every transient this tool writes into the library, and nothing else. */
+const INTERRUPTED = new RegExp(
+  `^${UPGRADE_PREFIX.replace(".", "\\.")}(\\d+)-|\\.(\\d+)(?:${RAW_SUFFIX}|${PART_SUFFIX})$`,
+);
+
+/**
  * Consecutive failures that mean the run itself is broken rather than the tracks being odd.
  *
  * A missing codec, a wrong ffmpeg invocation or a share that went read-only fails *every*
@@ -148,10 +173,21 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
     alreadyBest: 0,
   };
 
+  // Housekeeping, before the run proper. The sweep goes before the index is built so a
+  // partial file from a killed run is neither counted nor left to accumulate. Both are
+  // skipped on a dry run, which does not get to delete anything.
+  if (!options.dryRun) {
+    await sweepInterrupted(config.libraryDir);
+    await pruneRetired(config);
+  }
+
   // Built once up front rather than stat'ing per track: the whole point is to match files
   // this tool did not write, whose names will not be the ones it would have chosen.
   const library = await LibraryIndex.build(config.libraryDir);
   const allowedTiers = new Set(TIER_ORDER.slice(0, TIER_ORDER.indexOf(options.skipTier) + 1));
+  // Read on dry runs too, so the plan matches what a real run would actually do rather than
+  // re-proposing upgrades an earlier run already established TIDAL will not serve.
+  const ledger = options.upgrade ? await UpgradeLedger.open(config.dataDir) : undefined;
   let consecutiveFailures = 0;
 
   log.info("Starting download", {
@@ -161,6 +197,7 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
     source: options.playlist ?? "collection",
     skipTier: options.skipTier,
     upgrade: Boolean(options.upgrade),
+    ...(ledger ? { knownUpgradeAttempts: ledger.size } : {}),
   });
 
   for (const [index, track] of selected.entries()) {
@@ -187,7 +224,7 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
     // What replacing this file would actually get us, if anything. Undefined means leave it
     // alone: either upgrading is off, or the file is already as good as TIDAL's copy, or it
     // could not be read — and an unreadable file is not grounds for overwriting it.
-    const upgrade = matched && options.upgrade ? await considerUpgrade(matched, track, options) : undefined;
+    const upgrade = matched && options.upgrade ? await considerUpgrade(matched, track, options, ledger) : undefined;
 
     const emit = (outcome: DownloadOutcome, detail?: string, path?: string) =>
       options.onEvent?.({ index: index + 1, track: label(track), outcome, detail, path });
@@ -229,27 +266,73 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
     log.info(`[${index + 1}/${selected.length}] ${label(track)}${upgrade ? " (upgrade)" : ""}`);
 
     try {
-      const destination = join(config.libraryDir, track.path);
       // Unreachable on a dry run: the loop `continue`s above before it gets here.
-      const written = upgrade
-        ? await replace(config, session!, track, destination, upgrade.path, options.quality)
-        : await downloadTrack(session!, track.tidalId, destination, options.quality);
+      const destination = join(config.libraryDir, track.path);
 
-      if (!written) {
-        report.unavailable += 1;
-        emit("unavailable", "TIDAL served only a preview at every tier");
-      } else if (upgrade) {
-        report.upgraded += 1;
-        report.upgradedFrom[upgrade.from.tier] += 1;
-        log.info("Replaced with a better copy", {
-          track: label(track),
-          from: describeQuality(upgrade.from),
-          to: upgrade.to,
-        });
-        emit("upgraded", `${describeQuality(upgrade.from)} → ${upgrade.to}`, relative(config.libraryDir, written));
+      if (upgrade) {
+        const result = await replace(config, session!, track, destination, upgrade, options.quality);
+
+        // Remember what TIDAL actually served. `unavailable` says nothing about quality, so
+        // it is not recorded — a track that becomes entitled later deserves another look.
+        if (result.outcome !== "unavailable") {
+          // A replacement `replace` could not read is recorded as no better than what was
+          // already here — that is the conclusion it acted on, and leaving it unrecorded
+          // would put the track back in the queue every run with the same answer waiting.
+          await ledger?.record(track.tidalId, upgrade.to, result.achieved ?? upgrade.from.tier);
+        }
+
+        if (result.outcome === "unavailable") {
+          report.unavailable += 1;
+          emit("unavailable", "TIDAL served only a preview at every tier");
+        } else if (result.outcome === "not-better") {
+          report.skipped += 1;
+          report.skippedByTier[upgrade.tier] += 1;
+          report.alreadyBest += 1;
+          log.info("Kept the existing file — TIDAL's copy was no better", {
+            track: label(track),
+            existing: describeQuality(upgrade.from),
+            expected: upgrade.to,
+            served: result.achieved ?? "unreadable",
+          });
+          emit(
+            "skipped",
+            `TIDAL served ${result.achieved ?? "an unreadable file"}, no better than ` +
+              `${describeQuality(upgrade.from)}`,
+            library.relative(upgrade.path),
+          );
+        } else {
+          report.upgraded += 1;
+          report.upgradedFrom[upgrade.from.tier] += 1;
+          log.info("Replaced with a better copy", {
+            track: label(track),
+            from: describeQuality(upgrade.from),
+            to: result.achieved,
+          });
+          emit(
+            "upgraded",
+            `${describeQuality(upgrade.from)} → ${result.achieved}`,
+            relative(config.libraryDir, result.path),
+          );
+        }
       } else {
-        report.downloaded += 1;
-        emit("downloaded", undefined, relative(config.libraryDir, written));
+        const written = await downloadTrack(session!, track.tidalId, destination, options.quality);
+
+        if (!written) {
+          report.unavailable += 1;
+          emit("unavailable", "TIDAL served only a preview at every tier");
+        } else {
+          report.downloaded += 1;
+          emit("downloaded", undefined, relative(config.libraryDir, written));
+
+          // A fresh download settles this account's entitlement for this track just as well
+          // as an upgrade attempt would, and it is free here — one local ffprobe rather than
+          // a second fetch of the same audio on the next run.
+          if (ledger) {
+            const landed = await probeQuality(written);
+            const aimed = attainableTier(track.mediaTags, options.quality);
+            if (landed) await ledger.record(track.tidalId, aimed, landed.tier);
+          }
+        }
       }
 
       consecutiveFailures = 0;
@@ -279,28 +362,66 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
   return report;
 }
 
+/** An upgrade worth attempting: what is on disk, what a download should beat it with. */
+type Upgrade = {
+  from: LocalQuality;
+  to: QualityTier;
+  /** Absolute path of the file that would be replaced. */
+  path: string;
+  /** How the library index matched it, so a declined upgrade can still be counted as a skip. */
+  tier: MatchTier;
+};
+
 /**
- * Decides whether TIDAL's copy of a track beats the one on disk.
+ * Decides whether TIDAL's copy of a track is worth trying to beat the one on disk with.
  *
  * Compares against what a download would *actually* produce — the best TIDAL offers, capped
  * by the quality asked for — rather than against TIDAL's catalogue entry, so a lossless run
  * never claims it is about to upgrade a FLAC to hi-res and then writes 16-bit.
+ *
+ * That is still only a claim about the catalogue, and the catalogue is not the account: see
+ * `src/upgrades.ts` for why a run that has already been disappointed by a track must not
+ * keep being optimistic about it.
  */
 async function considerUpgrade(
-  existing: { path: string },
+  existing: { path: string; tier: MatchTier },
   track: ExportedTrack,
   options: DownloadOptions,
-): Promise<{ from: LocalQuality; to: QualityTier; path: string } | undefined> {
+  ledger: UpgradeLedger | undefined,
+): Promise<Upgrade | undefined> {
   const from = await probeQuality(existing.path);
   if (!from) return undefined;
 
   const to = attainableTier(track.mediaTags, options.quality);
-  // Carries the path so the branches that act on an upgrade need not re-narrow the match.
-  return rank(to) > rank(from.tier) ? { from, to, path: existing.path } : undefined;
+  if (rank(to) <= rank(from.tier)) return undefined;
+
+  if (ledger?.settled(track.tidalId, to, from.tier)) {
+    log.debug("Not re-attempting an upgrade TIDAL has already declined to serve", {
+      track: label(track),
+      existing: describeQuality(from),
+      wanted: to,
+    });
+    return undefined;
+  }
+
+  // Carries the path and tier so the branches that act on an upgrade need not re-narrow the
+  // match they came from.
+  return { from, to, path: existing.path, tier: existing.tier };
 }
 
 /**
- * Downloads a better copy and retires the old file.
+ * What came of trying to replace a file.
+ *
+ * `not-better` is the case that only exists because entitlement cannot be known in advance:
+ * TIDAL served the track, and once it was on disk it turned out to be no improvement.
+ */
+type ReplaceResult =
+  | { outcome: "replaced"; path: string; achieved: QualityTier }
+  | { outcome: "not-better"; achieved: QualityTier | undefined }
+  | { outcome: "unavailable" };
+
+/**
+ * Downloads a better copy, checks it really is one, and only then retires the old file.
  *
  * The old file is moved into `DATA_DIR/replaced/`, mirroring its path in the library, rather
  * than deleted — this is the one operation that destroys something the user already had, and
@@ -309,67 +430,245 @@ async function considerUpgrade(
  * usually lands under a different extension, so keeping both would show up as a duplicate in
  * whatever is serving the library.
  *
- * Ordering matters. When the new file would land on the old one's exact path, the old is
- * moved aside *first* and put back if the download fails; otherwise it is only retired once
- * the replacement is safely written.
+ * The candidate is fetched to a scratch name beside where it would live rather than over the
+ * file it hopes to replace, and the existing copy is not touched until the new one is on disk
+ * *and* has been read back and found better. That covers all three ways an upgrade fails to
+ * arrive — the download throws, TIDAL serves a preview, or the file that lands is no
+ * improvement — with the original never having moved, and it means a run killed mid-download
+ * leaves a stray dotfile rather than a hole in the library.
+ *
+ * The last of those three is the one that matters most, because it is routine rather than
+ * exotic: `mediaTags` promise what the *catalogue* holds, not what this subscription may
+ * stream. Without reading the result back, a `hires` run on an account without the hi-res
+ * tier quietly rewrites the library with byte-identical 16-bit FLAC, and does it again every
+ * run — see `src/upgrades.ts`.
  */
 async function replace(
   config: Config,
   session: DeviceSession,
   track: ExportedTrack,
   destination: string,
-  existingPath: string,
+  upgrade: Upgrade,
   quality: Quality,
-): Promise<string | undefined> {
-  // Empty `replacedDir` means the old file is deleted rather than kept. It is still only
-  // removed once the replacement is on disk, so the failure modes below are unchanged —
-  // except that "put it back" becomes impossible, which is why retiring is the default.
-  const retired = config.replacedDir
-    ? join(config.replacedDir, relative(config.libraryDir, existingPath))
-    : undefined;
-  if (retired) await mkdir(dirname(retired), { recursive: true });
+): Promise<ReplaceResult> {
+  // Leading dot, so a scanner watching the library ignores whatever a crash leaves behind.
+  // `downloadTrack` picks the extension itself — it walks down tiers — so the real target is
+  // only known once something has actually been written.
+  const scratch = join(dirname(destination), `${UPGRADE_PREFIX}${process.pid}-${basename(destination)}`);
 
-  const collides = existingPath === destination;
-  // Without somewhere to put it, a colliding path has to be moved aside temporarily anyway:
-  // the download would otherwise overwrite the only copy before it is known to have worked.
-  const parked = retired ?? `${existingPath}.superseded`;
-  if (collides) await rename(existingPath, parked);
+  const written = await downloadTrack(session, track.tidalId, scratch, quality);
+  if (!written) return { outcome: "unavailable" };
 
-  let written: string | undefined;
+  // An unreadable replacement is treated exactly like a worse one. `considerUpgrade` refuses
+  // to judge a file it cannot probe; the same reticence has to apply to the file that wants
+  // to take its place, or the one check that cannot describe what it wrote wins by default.
+  const landed = await probeQuality(written);
+  if (!landed || rank(landed.tier) <= rank(upgrade.from.tier)) {
+    await rm(written, { force: true });
+    return { outcome: "not-better", achieved: landed?.tier };
+  }
+
+  // Retire first, then move in: the two can be the same path when the extension has not
+  // changed, and a rename within one directory is not something that fails halfway.
+  const target = withExtension(destination, extname(written));
+  await retire(config, upgrade.path);
+  await mkdir(dirname(target), { recursive: true });
+  await rename(written, target);
+
+  return { outcome: "replaced", path: target, achieved: landed.tier };
+}
+
+/**
+ * Puts the superseded file where it can be recovered from, or deletes it when no
+ * `replacedDir` is configured.
+ *
+ * Never throws. The replacement is already on disk and about to take the name, so a retire
+ * that cannot happen is a lost undo rather than a failed upgrade — but it is not a reason to
+ * leave two copies of the track in the library either, which is what a bare rethrow would do.
+ */
+async function retire(config: Config, path: string): Promise<void> {
+  if (!config.replacedDir) {
+    await rm(path, { force: true });
+    return;
+  }
+
+  const retired = join(config.replacedDir, relative(config.libraryDir, path));
+
   try {
-    written = await downloadTrack(session, track.tidalId, destination, quality);
+    await mkdir(dirname(retired), { recursive: true });
+    await rename(path, retired);
+    await stamp(retired);
   } catch (error) {
-    // Put it back before anything else — a failed upgrade must not cost the user the file
-    // they already had.
-    if (collides) await rename(parked, existingPath);
-    throw error;
-  }
-
-  if (!written) {
-    // Preview-only at every tier: nothing was written, so restore and leave it be.
-    if (collides) await rename(parked, existingPath);
-    return undefined;
-  }
-
-  if (collides) {
-    // Parked out of the way only because the replacement needed the name; with no retire
-    // directory configured, this is where the old copy is actually discarded.
-    if (!retired) await rm(parked, { force: true });
-  } else if (retired) {
-    await rename(existingPath, retired).catch(async (error: unknown) => {
-      // The replacement is already on disk; failing to retire the old one would leave two
-      // copies, so say so loudly rather than reporting a clean upgrade.
-      log.warn("Downloaded the better copy but could not retire the old file", {
-        old: existingPath,
-        error: String(error),
+    // A `replacedDir` on another filesystem is the expected reason — rename cannot cross one.
+    // Copying is slower but it is the difference between keeping the undo and losing it.
+    try {
+      await Bun.write(retired, Bun.file(path));
+      await rm(path, { force: true });
+      await stamp(retired);
+    } catch (copyError) {
+      log.warn("Replaced the file but could not retire the old copy, so it was deleted", {
+        path,
+        to: retired,
+        error: String((error as NodeJS.ErrnoException).code === "EXDEV" ? copyError : error),
       });
-      await rm(retired, { force: true });
-    });
-  } else {
-    await rm(existingPath, { force: true });
+      await rm(path, { force: true });
+    }
   }
+}
 
-  return written;
+/**
+ * Marks a retired file with the moment it was retired, which is what `pruneRetired` ages it
+ * out on.
+ *
+ * A file's own mtime is when it was *written* — for a rip from 2014, a decade before anything
+ * replaced it. Pruning on that would delete the file the instant it was retired and take the
+ * undo with it, so the clock has to start when the file arrives here.
+ */
+async function stamp(path: string): Promise<void> {
+  const now = new Date();
+  await utimes(path, now, now).catch((error: unknown) => {
+    // Not fatal — the file is retired either way — but it does mean this one will be judged
+    // on the age of the recording rather than the age of the decision, so say so out loud.
+    log.warn("Could not stamp a retired file with its retire time; it may be pruned early", {
+      path,
+      error: String(error),
+    });
+  });
+}
+
+/** `Title.flac` + `.m4a` -> `Title.m4a`. Mirrors what `downloadTrack` does to its target. */
+function withExtension(path: string, extension: string): string {
+  return path.replace(/\.[^./]*$/, "") + extension;
+}
+
+/**
+ * Clears transient files left by a run that did not get to finish.
+ *
+ * Nothing here is reachable in normal operation — every path that writes one of these
+ * removes it, on success and on failure alike. It exists for the kill: `daemon` exits on
+ * SIGTERM without waiting for the download to reach a track boundary, so every container
+ * restart, redeploy or crash during a scheduled backup strands a partial file in the library,
+ * and nothing else would ever tidy it up. Downloads only became unattended when they went on
+ * the schedule, which is what makes this worth having.
+ *
+ * The names it matches are ones only this tool writes — see `RAW_SUFFIX` in
+ * `tidal/download.ts` for why they look the way they do. Anything tagged with *this* pid is
+ * left alone, so a run cannot delete a file it is in the middle of writing.
+ */
+async function sweepInterrupted(libraryDir: string): Promise<void> {
+  const removed: string[] = [];
+
+  const walk = async (directory: string): Promise<void> => {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await walk(path);
+        continue;
+      }
+
+      const match = INTERRUPTED.exec(entry.name);
+      if (!match) continue;
+      // Its own in-flight work, from a concurrent run in this process. Not ours to remove.
+      if (Number(match[1] ?? match[2]) === process.pid) continue;
+
+      try {
+        await rm(path, { force: true });
+        removed.push(relative(libraryDir, path));
+      } catch (error) {
+        log.warn("Could not remove a leftover from an interrupted run", { path, error: String(error) });
+      }
+    }
+  };
+
+  await walk(libraryDir);
+
+  if (removed.length > 0) {
+    log.info("Cleared leftovers from a run that was interrupted", { files: removed.length });
+    for (const path of removed) log.debug("Removed leftover", { path });
+  }
+}
+
+/**
+ * Ages retired files out of `replacedDir`.
+ *
+ * That directory is the undo for the one operation that destroys something you already had,
+ * so it is deliberately not cleared as soon as the replacement lands. But it is also where
+ * most of a library ends up if you upgrade most of a library — gigabytes — and nothing else
+ * would ever remove any of it.
+ *
+ * A retention window rather than a weekly wipe: emptying it every Sunday would give a file
+ * retired on Saturday night one day of undo and a file retired on Monday a full seven, where
+ * this gives every file the same week no matter when it arrived. Run from `runDownload`, so
+ * it happens wherever retiring happens — on every daemon tick, and on a one-off CLI run.
+ */
+async function pruneRetired(config: Config): Promise<void> {
+  if (!config.replacedDir || config.replacedRetentionDays <= 0) return;
+
+  const cutoff = Date.now() - config.replacedRetentionDays * 24 * 60 * 60 * 1000;
+  let files = 0;
+  let bytes = 0;
+
+  /** Returns true when the directory was removed, so a parent knows it lost a child. */
+  const walk = async (directory: string, isRoot: boolean): Promise<boolean> => {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+
+    let kept = 0;
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+
+      if (entry.isDirectory()) {
+        if (!(await walk(path, false))) kept += 1;
+        continue;
+      }
+
+      try {
+        const info = await stat(path);
+        // mtime, because `stamp` set it to the moment the file was retired. Deliberately not
+        // ctime: `stamp` bumps that too, so nothing that has ever been stamped could age.
+        if (info.mtimeMs >= cutoff) {
+          kept += 1;
+          continue;
+        }
+        await rm(path, { force: true });
+        files += 1;
+        bytes += info.size;
+      } catch (error) {
+        kept += 1;
+        log.warn("Could not prune a retired file", { path, error: String(error) });
+      }
+    }
+
+    // An upgraded library otherwise leaves a skeleton of empty Artist/Album folders behind
+    // for ever. The root stays regardless — the next retire needs somewhere to put things.
+    if (kept > 0 || isRoot) return false;
+    await rmdir(directory).catch(() => {});
+    return true;
+  };
+
+  await walk(config.replacedDir, true);
+
+  if (files > 0) {
+    log.info("Pruned replaced files past their retention window", {
+      files,
+      megabytes: Math.round(bytes / 1_000_000),
+      retentionDays: config.replacedRetentionDays,
+      directory: config.replacedDir,
+    });
+  }
 }
 
 async function readManifest(config: Config): Promise<ExportManifest> {

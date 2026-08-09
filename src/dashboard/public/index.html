@@ -94,8 +94,10 @@
 
       <!--
         The whole backup path, in the order it has to happen: authorise a playback session,
-        snapshot the catalogue, then fetch audio. Each step says why it is not ready yet
-        rather than just being disabled.
+        snapshot the catalogue, then fetch audio from that snapshot. Only the first and last
+        are things to press — the snapshot is a phase of the run, not a button, because a
+        download works from it and a stale one fetches a stale collection. Each step says why
+        it is not ready yet rather than just being disabled.
       -->
       <section class="panel" aria-labelledby="backup-heading">
         <div class="panel-head">
@@ -129,25 +131,19 @@
           <li class="step" id="step-export">
             <div class="step-head">
               <span class="step-index">2</span>
-              <h3 class="step-title">Export the catalogue</h3>
+              <h3 class="step-title">Catalogue snapshot</h3>
               <span class="chip chip-idle" id="export-chip">never run</span>
             </div>
             <p class="step-note" id="export-note">
               Playlists, the collection and every ISRC — written to DATA_DIR/export.
             </p>
             <div class="readout readout-tight" id="export-readout" hidden></div>
-
-            <div class="step-actions">
-              <button type="button" id="export-button" class="run-button">
-                <span class="run-button-label">Export now</span>
-              </button>
-            </div>
           </li>
 
           <li class="step" id="step-download">
             <div class="step-head">
               <span class="step-index">3</span>
-              <h3 class="step-title">Download audio</h3>
+              <h3 class="step-title">Sync &amp; download</h3>
               <span class="chip chip-idle" id="download-chip">idle</span>
             </div>
             <p class="step-note" id="download-note">&nbsp;</p>
@@ -184,7 +180,10 @@
 
             <label class="toggle">
               <input id="field-dry-run" type="checkbox" checked />
-              <span>Dry run — list what would be fetched, download nothing</span>
+              <span>
+                Dry run — plan against the snapshot above and contact nothing. A real run
+                refreshes the snapshot first, so it always fetches your collection as it is now.
+              </span>
             </label>
 
             <label class="toggle">
@@ -219,7 +218,7 @@
 
             <div class="step-actions">
               <button type="button" id="download-button" class="run-button">
-                <span class="run-button-label">Start download</span>
+                <span class="run-button-label">Sync &amp; download</span>
                 <span class="run-button-spinner is-job" aria-hidden="true"></span>
               </button>
               <button type="button" id="stop-button" class="run-button run-button-quiet" hidden>
