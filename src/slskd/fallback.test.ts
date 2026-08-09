@@ -28,6 +28,7 @@ let responses: unknown[] = [];
 let transferMode: "succeed" | "slow" | "error" = "succeed";
 let enqueued: Array<{ username: string; filename: string; destination: string }> = [];
 let searches: string[] = [];
+let searchTimeouts: number[] = [];
 
 let root: string;
 let config: Config;
@@ -48,6 +49,7 @@ beforeEach(async () => {
   transferMode = "succeed";
   enqueued = [];
   searches = [];
+  searchTimeouts = [];
 
   server = Bun.serve({
     port: 0,
@@ -57,7 +59,9 @@ beforeEach(async () => {
       const path = url.pathname;
 
       if (path === "/api/v0/searches" && request.method === "POST") {
-        searches.push(((await request.json()) as { searchText: string }).searchText);
+        const body = (await request.json()) as { searchText: string; searchTimeout: number };
+        searches.push(body.searchText);
+        searchTimeouts.push(body.searchTimeout);
         return Response.json({ id: "x" });
       }
       if (path.startsWith("/api/v0/searches/") && request.method === "GET") {
@@ -194,6 +198,18 @@ describe("a track TIDAL would not serve", () => {
     expect(report.downloaded).toBe(0);
     expect(enqueued).toHaveLength(0);
     expect(outcomes[0]?.detail).toContain("none convincingly");
+  });
+
+  test("asks slskd for the timeout in milliseconds, which is what it actually wants", async () => {
+    responses = [peer("goodpeer", "@@x\\\\Portishead\\\\Glory Box.flac")];
+
+    await collect();
+
+    // slskd documents the default as "15 seconds" and the range as 5..int.MaxValue, which
+    // reads as seconds and is not. Sending 20 asks for a 20-millisecond search: it completes
+    // instantly with nothing, and looks exactly like a network with no peers on it.
+    expect(searchTimeouts).toEqual([config.slskd.searchTimeoutMs]);
+    expect(searchTimeouts[0]).toBeGreaterThan(1000);
   });
 
   test("says so plainly when nobody answers at all", async () => {

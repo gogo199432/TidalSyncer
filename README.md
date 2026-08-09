@@ -507,9 +507,14 @@ stranger chose next to numbers that stranger reported, and neither has to be tru
 title must appear in the filename and the artist somewhere in its path; non-audio extensions
 and implausible sizes are dropped; and a reported duration that disagrees by more than 12
 seconds rejects the file outright, which is what keeps live takes and extended mixes out.
-Bitrate, sample rate, queue length and upload speed only *rank* what has already survived —
-they are absent from a large fraction of real results, so a matcher that needed them would
-throw away every peer who simply shares files without tagging them.
+Files a peer has locked are rejected too: those are shared only with users it has privileged,
+so queueing one earns an immediate refusal however well it matches.
+
+Bitrate, sample rate, queue length and upload speed only *rank* what has already survived,
+and that is not fastidiousness. Measured against one real search — 243 peers, 687 files —
+**only 66% of files carried a duration and 40% a bitrate**, and `extension` is frequently the
+empty string even where the filename plainly ends in `.flac`. A matcher that required any of
+them would throw away most of the network.
 
 **Lossless always beats lossy**, however long the queue. Waiting is recoverable: the track is
 absent and the next run tries again. An mp3 is not — nothing will ever upgrade a track TIDAL

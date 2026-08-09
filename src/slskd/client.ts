@@ -23,11 +23,18 @@ import { log } from "../logger.ts";
  * Verified against slskd 0.26.0.
  */
 
-/** A file a peer says it is sharing. Only `filename` and `size` are ever guaranteed. */
+/**
+ * A file a peer says it is sharing. Only `filename` and `size` are ever guaranteed.
+ *
+ * Measured against a real search (243 peers, 687 files): 66% reported a `length` and 40% a
+ * `bitRate`. `extension` is frequently the empty string even when the filename plainly has
+ * one. Anything that treats these as present throws away most of the network.
+ */
 export type SlskdFile = {
   /** The peer's own path, backslash-separated. This is the handle for downloading it. */
   filename: string;
   size: number;
+  /** Often "" even when the filename has one, so read it from the name instead. */
   extension?: string;
   bitRate?: number;
   bitDepth?: number;
@@ -35,6 +42,8 @@ export type SlskdFile = {
   /** Seconds, when the peer reports it. */
   length?: number;
   isVariableBitRate?: boolean;
+  /** The peer shares this only with users it has privileged; asking for it gets nowhere. */
+  isLocked?: boolean;
 };
 
 /** One peer's answer to a search. */
@@ -93,12 +102,16 @@ export class SlskdClient {
    */
   async search(text: string): Promise<SlskdResponse[]> {
     const id = crypto.randomUUID();
-    const seconds = Math.max(5, Math.round(this.config.searchTimeoutMs / 1000));
 
     await this.request("POST", "/api/v0/searches", {
       id,
       searchText: text,
-      searchTimeout: seconds,
+      // Milliseconds, despite slskd's docs describing the default as "15 seconds" and the
+      // field's range as 5 to int.MaxValue. Sending seconds asks for a 20-*millisecond*
+      // search, which completes instantly and reports nothing — indistinguishable from a
+      // network with no peers on it, and it cost a long time to find. Verified against
+      // 0.26.0: 20 returns 0 responses where 20000 returns hundreds.
+      searchTimeout: this.config.searchTimeoutMs,
       // Peers that answer with a single unrelated file are noise; so are the ones sharing
       // nothing. slskd's own filtering is cheaper than pulling it all back and discarding it.
       filterResponses: true,

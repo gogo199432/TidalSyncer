@@ -72,6 +72,16 @@ describe("what a candidate has to look like", () => {
     expect(plausible(file("Portishead\\Glory Box.flac", { length: 299 }), TRACK)).toBe(true);
   });
 
+  test("refuses a locked file, which the peer will not serve however well it matches", () => {
+    expect(plausible(file("Portishead\\Glory Box.flac", { isLocked: true }), TRACK)).toBe(false);
+  });
+
+  test("reads the extension from the name when the peer reports an empty one", () => {
+    // Measured against a real search: `extension` is commonly "" even when the filename
+    // plainly ends in .flac, so trusting the field would reject most of the network.
+    expect(plausible(file("Portishead\\Glory Box.flac", { extension: "" }), TRACK)).toBe(true);
+  });
+
   test("does not hold a missing length against a peer that reports nothing", () => {
     // Most real results carry no attributes at all; requiring them would reject the peers who
     // simply share files without tagging them.

@@ -104,6 +104,10 @@ export function basenameOf(file: SlskdFile): string {
  * in the basename would reject most of a well-organised share.
  */
 export function plausible(file: SlskdFile, track: WantedTrack, losslessOnly = false): boolean {
+  // A locked file is one the peer shares only with users it has privileged. Queueing it wins
+  // an immediate rejection, so it is not a candidate however well it matches.
+  if (file.isLocked) return false;
+
   const format = FORMATS[extensionOf(file)];
   if (!format) return false;
   // For a library that is otherwise all FLAC, an mp3 can be worse than a gap. Off by default:
