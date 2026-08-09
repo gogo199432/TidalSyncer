@@ -561,14 +561,19 @@ function renderDownloadStep(backup) {
   $("progress-track").classList.toggle("is-live", running);
 
   if (total > 0) {
-    const tally = { downloaded: 0, upgraded: 0, skipped: 0, unavailable: 0, missing: 0, failed: 0 };
-    for (const event of events) tally[event.outcome] = (tally[event.outcome] ?? 0) + 1;
+    const tally = { downloaded: 0, upgraded: 0, skipped: 0, soulseek: 0, unavailable: 0, missing: 0, failed: 0 };
+    // A track can be reported twice — unavailable in the TIDAL pass, then rescued from
+    // Soulseek afterwards — so the bar counts each position once and takes the last word on
+    // it. Tallying every event would push the bar past 100% and undercount nothing.
+    const finalByIndex = new Map();
+    for (const event of events) finalByIndex.set(event.index, event.outcome);
+    for (const outcome of finalByIndex.values()) tally[outcome] = (tally[outcome] ?? 0) + 1;
 
     for (const [outcome, count] of Object.entries(tally)) {
       $(`seg-${outcome}`).style.width = `${(count / total) * 100}%`;
     }
 
-    const done = events.length;
+    const done = finalByIndex.size;
     renderLegend(tally, total - done, request?.dryRun);
     $("progress-line").textContent = running
       ? `${progress?.index ?? done} / ${total} · ${progress?.track ?? "…"}`
@@ -615,6 +620,9 @@ function renderDownloadStep(backup) {
           ["Unavailable", report.unavailable, "preview only"],
           // Only shown when there are some: a constant zero is noise on a healthy collection.
           ...(report.missing > 0 ? [["Missing", report.missing, "not in the snapshot"]] : []),
+          // Only when a Soulseek pass actually ran; absent means slskd is not configured,
+          // which is a different thing from "tried and got nothing".
+          ...(report.soulseek ? [["From Soulseek", report.soulseek.downloaded, "TIDAL would not serve"]] : []),
           ["Failed", report.failed],
           ["Total", report.total, "considered"],
         ]
@@ -627,6 +635,9 @@ const OUTCOME_LABEL = {
   downloaded: ["downloaded", "to fetch"],
   upgraded: ["upgraded", "to replace"],
   skipped: ["skipped", "already there"],
+  // A dry run never reaches Soulseek, so the conditional form is unreachable but present for
+  // the lookup's sake.
+  soulseek: ["soulseek", "soulseek"],
   unavailable: ["unavailable", "unavailable"],
   // Reads the same either way — a tombstoned track is no more fetchable on a real run than on
   // a dry one — and matches the readout's column, with the row's own detail saying what it
@@ -771,10 +782,20 @@ function describeReport(report, request, backup) {
   }
   if (report.missing > 0) {
     parts.push(
-      `${plural(report.missing, "track")} carry no metadata in the snapshot and were never ` +
+      `${plural(report.missing, "track")} had no metadata in the snapshot, so nothing was ` +
         "attempted — delisted since you favourited them, or not sold in your country. The " +
         "export keeps their ids.",
     );
+  }
+
+  const soulseek = report.soulseek;
+  if (soulseek && soulseek.considered > 0) {
+    const bits = [`Soulseek: ${soulseek.downloaded} of ${soulseek.considered} fetched`];
+    if (soulseek.queued > 0) bits.push(`${soulseek.queued} still queued (a later run files them)`);
+    if (soulseek.notFound > 0) bits.push(`${soulseek.notFound} not found`);
+    if (soulseek.unsearchable > 0) bits.push(`${soulseek.unsearchable} with nothing to search on`);
+    if (soulseek.failed > 0) bits.push(`${soulseek.failed} failed`);
+    parts.push(`${bits.join(", ")}.`);
   }
   if (parts.length === 0) parts.push(`Everything in ${backup.libraryDir} is up to date.`);
   return parts.join(" ");

@@ -17,6 +17,16 @@ export type ExportManifest = {
   favoriteIds: string[];
   /** Every track referenced above, keyed by TIDAL id. */
   tracks: Record<string, ExportedTrack>;
+  /**
+   * The scraps left of tracks TIDAL would not describe, keyed by TIDAL id.
+   *
+   * A delisted or region-locked favourite returns nothing from `/tracks`, so it gets no entry
+   * above and nothing can be downloaded from TIDAL for it. The *collection* listing is a
+   * different endpoint and often still carries a title and an ISRC for the same track, which
+   * is the difference between a track that is merely gone and one that cannot even be looked
+   * for somewhere else. Added after the first release, so an older snapshot has none.
+   */
+  tombstones?: Record<string, Tombstone>;
   stats: {
     playlists: number;
     favorites: number;
@@ -32,6 +42,14 @@ export type ExportedTrack = TrackDetail & {
   /** Library-relative, extension included: `Artist/Album/Title.flac`. */
   path: string;
   /** When the user favourited it. Only set for collection tracks. */
+  addedAt?: string;
+};
+
+/** What is still known about a track TIDAL has stopped describing. Both fields are optional. */
+export type Tombstone = {
+  title?: string;
+  /** The handle that survives everything: it resolves against MusicBrainz for ever. */
+  isrc?: string;
   addedAt?: string;
 };
 
@@ -70,6 +88,16 @@ export async function runExport(config: Config): Promise<ExportResult> {
     tracks[trackId] = { ...detail, path: libraryPath(detail), addedAt: addedAt.get(trackId) };
   }
 
+  // Whatever the collection listing still knows about the ones `/tracks` would not describe.
+  // Kept even when it is only an ISRC: that resolves to a name against MusicBrainz long after
+  // TIDAL has forgotten the track, and a name is what it takes to look for it anywhere else.
+  const tombstones: Record<string, Tombstone> = {};
+  for (const track of collection) {
+    if (details.has(track.trackId)) continue;
+    if (!track.title && !track.isrc) continue;
+    tombstones[track.trackId] = { title: track.title, isrc: track.isrc, addedAt: track.addedAt };
+  }
+
   const manifest: ExportManifest = {
     version: EXPORT_VERSION,
     exportedAt: new Date().toISOString(),
@@ -77,6 +105,7 @@ export async function runExport(config: Config): Promise<ExportResult> {
     playlists,
     favoriteIds,
     tracks,
+    tombstones,
     stats: {
       playlists: playlists.length,
       favorites: favoriteIds.length,
@@ -129,9 +158,18 @@ function renderM3u(name: string, trackIds: string[], tracks: Record<string, Expo
 
 /** `Artist/Album/Title.flac` — the layout Navidrome, Plex and beets all read without help. */
 function libraryPath(track: TrackDetail): string {
-  const artist = sanitize(track.artists[0] ?? "Unknown Artist");
-  const album = sanitize(track.album ?? "Unknown Album");
-  return `${artist}/${album}/${sanitize(track.title)}.flac`;
+  return libraryPathFor(track.artists[0], track.album, track.title);
+}
+
+/**
+ * The same layout, from loose parts.
+ *
+ * Exported because the Soulseek fallback has to put a file in exactly the place the TIDAL
+ * path would have gone — and for a delisted track it is building that path from a name
+ * MusicBrainz gave back rather than from anything TIDAL said.
+ */
+export function libraryPathFor(artist: string | undefined, album: string | undefined, title: string): string {
+  return `${sanitize(artist ?? "Unknown Artist")}/${sanitize(album ?? "Unknown Album")}/${sanitize(title)}.flac`;
 }
 
 /**

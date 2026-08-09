@@ -78,6 +78,36 @@ export type Config = {
    */
   replacedRetentionDays: number;
   /**
+   * Soulseek, via a self-hosted slskd, as the fallback for tracks TIDAL will not serve —
+   * the ones the account is not entitled to, and the ones delisted out of the catalogue.
+   *
+   * Empty `url` switches the whole thing off, and that is the default: this reaches a
+   * peer-to-peer network on your behalf, which is not something to start doing by accident.
+   */
+  slskd: {
+    /** Base URL of slskd's web API, e.g. http://slskd:5030. Empty disables the fallback. */
+    url: string;
+    /** Needs slskd's `readwrite` role — searching and enqueueing both change state. */
+    apiKey: string;
+    /**
+     * Where *TidalSyncer* sees slskd's downloads directory. Defaults to `libraryDir`, which
+     * is right when both point at the same share: a finished download is then already in the
+     * library and only needs renaming into place.
+     */
+    downloadsDir: string;
+    /** How long slskd holds a search open. Soulseek searches expire rather than finish. */
+    searchTimeoutMs: number;
+    /** Ceiling on one API call, so a service that stops answering cannot hang a run. */
+    requestTimeoutMs: number;
+    /**
+     * How long to wait on a queued transfer before leaving it for the next run. Soulseek
+     * queues are measured in hours and a download run must not be.
+     */
+    transferTimeoutMs: number;
+    /** Refuse lossy candidates outright rather than taking one when nothing better is up. */
+    losslessOnly: boolean;
+  };
+  /**
    * Mirror the TIDAL collection's tracks back to ListenBrainz as loved recordings.
    * Additive only: a track dropped from the collection keeps its ListenBrainz love.
    */
@@ -224,6 +254,22 @@ export function loadConfig(): Config {
       ? ""
       : resolve(optional("DATA_DIR", "./data"), "replaced");
 
+  const slskdUrl = optional("SLSKD_URL", "");
+  if (slskdUrl) {
+    try {
+      new URL(slskdUrl);
+    } catch {
+      throw new ConfigError(`SLSKD_URL must be an absolute URL (got "${slskdUrl}")`);
+    }
+    if (!process.env.SLSKD_API_KEY?.trim()) {
+      throw new ConfigError(
+        "SLSKD_URL is set but SLSKD_API_KEY is empty. slskd's API needs a key with the " +
+          "`readwrite` role — searching and enqueueing both change state, and a read-only " +
+          "key is rejected.",
+      );
+    }
+  }
+
   // Retiring a file *into* the library is the one way an upgrade leaves you with two copies
   // of a track: the replacement under its own name, and the file it replaced still sitting
   // where a scanner will index it. Nothing downstream can detect that, so refuse it here.
@@ -260,6 +306,17 @@ export function loadConfig(): Config {
     upgrade: boolean("TIDAL_UPGRADE", false),
     replacedDir,
     replacedRetentionDays: integer("TIDAL_REPLACED_RETENTION_DAYS", 7, 0, 3650),
+    slskd: {
+      url: slskdUrl,
+      apiKey: optional("SLSKD_API_KEY", ""),
+      // Same share by default, which is the arrangement that lets a finished download be
+      // renamed into place rather than copied across a filesystem boundary.
+      downloadsDir: resolve(optional("SLSKD_DOWNLOADS_DIR", libraryDir)),
+      searchTimeoutMs: integer("SLSKD_SEARCH_TIMEOUT_MS", 20_000, 5_000, 120_000),
+      requestTimeoutMs: integer("SLSKD_REQUEST_TIMEOUT_MS", 30_000, 1_000, 300_000),
+      transferTimeoutMs: integer("SLSKD_TRANSFER_TIMEOUT_MS", 600_000, 0, 86_400_000),
+      losslessOnly: boolean("SLSKD_LOSSLESS_ONLY", false),
+    },
     syncFavorites,
     dataDir: resolve(optional("DATA_DIR", "./data")),
     schedule: optional("SYNC_SCHEDULE", "0 */6 * * *"),

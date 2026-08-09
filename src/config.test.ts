@@ -113,6 +113,50 @@ describe("TIDAL_REPLACED_RETENTION_DAYS", () => {
   });
 });
 
+describe("the Soulseek fallback", () => {
+  afterEach(() => {
+    delete process.env.SLSKD_URL;
+    delete process.env.SLSKD_API_KEY;
+    delete process.env.SLSKD_DOWNLOADS_DIR;
+    delete process.env.LIBRARY_DIR;
+  });
+
+  test("is off unless a URL is set, since it reaches a public network on your behalf", () => {
+    expect(loadConfig().slskd.url).toBe("");
+  });
+
+  test("refuses a URL with no key rather than failing every search at runtime", () => {
+    process.env.SLSKD_URL = "http://slskd:5030";
+    expect(() => loadConfig()).toThrow(/SLSKD_API_KEY/);
+  });
+
+  test("says the key needs the readwrite role, because a read-only one silently cannot search", () => {
+    process.env.SLSKD_URL = "http://slskd:5030";
+    expect(() => loadConfig()).toThrow(/readwrite/);
+  });
+
+  test("rejects a host with no scheme, which is the easy mistake to make", () => {
+    process.env.SLSKD_URL = "slskd.example";
+    process.env.SLSKD_API_KEY = "key";
+    expect(() => loadConfig()).toThrow(/absolute URL/);
+  });
+
+  test("downloads into the library by default, which is the same-share arrangement", () => {
+    process.env.LIBRARY_DIR = "/srv/music";
+    process.env.SLSKD_URL = "http://slskd:5030";
+    process.env.SLSKD_API_KEY = "key";
+    expect(loadConfig().slskd.downloadsDir).toBe("/srv/music");
+  });
+
+  test("takes a separate downloads directory when slskd writes somewhere else", () => {
+    process.env.LIBRARY_DIR = "/srv/music";
+    process.env.SLSKD_URL = "http://slskd:5030";
+    process.env.SLSKD_API_KEY = "key";
+    process.env.SLSKD_DOWNLOADS_DIR = "/srv/slskd";
+    expect(loadConfig().slskd.downloadsDir).toBe("/srv/slskd");
+  });
+});
+
 describe("BACKUP_ON_SCHEDULE", () => {
   afterEach(() => {
     delete process.env.BACKUP_ON_SCHEDULE;

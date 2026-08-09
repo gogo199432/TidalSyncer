@@ -481,6 +481,64 @@ the `.m3u8` files and in its **Unresolved / tombstoned** figure.
 A whole batch of metadata can also fail transiently — ids are looked up twenty at a time —
 which reads as twenty `missing` tracks for that run. The next snapshot picks them up.
 
+### Soulseek, for what TIDAL will not serve
+
+Optional, off by default, and it reaches a public peer-to-peer network on your behalf — so it
+stays off until you set `SLSKD_URL`. It needs a [slskd](https://github.com/slskd/slskd) you
+host yourself.
+
+```yaml
+SLSKD_URL: http://slskd:5030
+SLSKD_API_KEY: <a key with the readwrite role>
+```
+
+Both kinds of track that TIDAL cannot give you are tried:
+
+- **`unavailable`** — full metadata, so the search terms are exact.
+- **`missing`** — delisted, and all that survives is a TIDAL id plus whatever the *collection*
+  listing carried. If that included an ISRC, MusicBrainz turns it back into an artist and
+  title, which is the only thing Soulseek understands. Tombstones with no ISRC are reported as
+  `unsearchable` rather than guessed at.
+
+It runs as a second pass after the TIDAL loop, never inside it, and never on a dry run.
+
+**Choosing a file is written to refuse rather than to rank.** A search result is a filename a
+stranger chose next to numbers that stranger reported, and neither has to be true. So the
+title must appear in the filename and the artist somewhere in its path; non-audio extensions
+and implausible sizes are dropped; and a reported duration that disagrees by more than 12
+seconds rejects the file outright, which is what keeps live takes and extended mixes out.
+Bitrate, sample rate, queue length and upload speed only *rank* what has already survived —
+they are absent from a large fraction of real results, so a matcher that needed them would
+throw away every peer who simply shares files without tagging them.
+
+**Lossless always beats lossy**, however long the queue. Waiting is recoverable: the track is
+absent and the next run tries again. An mp3 is not — nothing will ever upgrade a track TIDAL
+does not have, so the library keeps it for good. `SLSKD_LOSSLESS_ONLY=true` refuses lossy
+outright if you would rather have the gap.
+
+**Slow transfers are left running, not cancelled.** Soulseek queues are measured in hours and
+a download run is not, so anything still going after `SLSKD_TRANSFER_TIMEOUT_MS` (10 minutes
+by default) is recorded in `DATA_DIR/slskd-pending.json` and filed into the library by
+whichever later run finds it finished. Cancelling would mean never getting the slow ones,
+which for these tracks usually means never getting them.
+
+**Where the file lands.** slskd is told to download into the track's own `Artist/Album`
+directory, and the finished file is then renamed to the name the library expects — keeping the
+extension that actually arrived, not the `.flac` the export optimistically assumed. That
+assumes `SLSKD_DOWNLOADS_DIR` (default: `LIBRARY_DIR`) and slskd's own downloads directory are
+the same storage. If they are not, point it at wherever this container sees slskd's downloads.
+
+Two things worth knowing before you switch it on:
+
+- **Soulseek expects you to share.** An account sharing nothing gets few search results and
+  sits at the back of every queue — slskd's own default config throttles peers with fewer than
+  one shared file to one slot at priority 999, and everyone else's does the same to you. If you
+  do share, filter this tool's transients so half-written files are never offered:
+  `\.tidalsyncer-raw$`, `\.tidalsyncer-part$`, `\.upgrading-`.
+- **The API key needs the `readwrite` role.** Searching and enqueueing both change state, and
+  a read-only key is rejected. Note that slskd's YAML config *overrides* environment
+  variables, so a key in `slskd.yml` wins over `SLSKD_API_KEY`.
+
 ### Upgrading what you already have
 
 ```bash
@@ -669,6 +727,11 @@ src/
   backup.ts         device login, and snapshot-then-download as one schedulable job
   quality.ts        ffprobe-backed tiering, for deciding what counts as an upgrade
   upgrades.ts       what each upgrade attempt actually got, so none is repeated for ever
+  slskd/
+    client.ts       the slskd HTTP API: search, enqueue, poll transfers
+    match.ts        which stranger's file to accept, written to refuse rather than rank
+    fallback.ts     the Soulseek pass: search, enqueue, wait, file into the library
+    pending.ts      transfers still queued when a run ends, for a later run to collect
   store.ts          atomic JSON state + run history + lookup cache
   logger.ts
   dashboard/

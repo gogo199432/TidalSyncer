@@ -833,6 +833,7 @@ a:hover {
 .seg-unavailable { background: var(--amber); }
 /* Muted and desaturated: nothing was attempted and nothing went wrong with the run — the
    track simply is not there to fetch. It should not read as a failure. */
+.seg-soulseek { background: #b58cf0; }
 .seg-missing { background: #6b6f78; }
 .seg-failed { background: var(--coral); }
 
@@ -999,6 +1000,7 @@ a:hover {
 .event-upgraded .event-tag { color: #7fb2f0; }
 .event-unavailable .event-tag { color: var(--amber); }
 .event-missing .event-tag { color: #9aa0aa; }
+.event-soulseek .event-tag { color: #b58cf0; }
 .event-skipped .event-tag { color: var(--text-faint); }
 .event-skipped .event-track { color: var(--text-dim); }
 

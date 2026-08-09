@@ -64,6 +64,15 @@ services:
       # it out; weekly-exploration is usually the one worth filtering.
       TIDAL_SKIP_COLLECTION_FOR: ${TIDAL_SKIP_COLLECTION_FOR:-}
 
+      # Soulseek fallback, for the tracks TIDAL will not serve. Empty leaves it off, which
+      # is the default — it reaches a public peer-to-peer network on your behalf. The key
+      # needs slskd's `readwrite` role; a read-only one cannot search or enqueue.
+      SLSKD_URL: ${SLSKD_URL:-}
+      SLSKD_API_KEY: ${SLSKD_API_KEY:-}
+      # Defaults to LIBRARY_DIR, which is right when slskd downloads into the same share.
+      SLSKD_DOWNLOADS_DIR: ${SLSKD_DOWNLOADS_DIR:-}
+      SLSKD_LOSSLESS_ONLY: ${SLSKD_LOSSLESS_ONLY:-false}
+
       # Downloading. Empty (the default) leaves `download` off; `export` is unaffected.
       # This is NOT the developer-portal client id above — see .env.example for why the
       # two cannot be the same, and what setting it means.

@@ -28,7 +28,14 @@ type SearchResponse = {
     title?: string;
     score?: number;
     isrcs?: string[];
+    "artist-credit"?: Array<{ name?: string; artist?: { name?: string } }>;
   }>;
+};
+
+/** Enough to search for a recording somewhere that is not TIDAL. */
+export type RecordingName = {
+  artist: string;
+  title: string;
 };
 
 export class MusicBrainzClient {
@@ -77,6 +84,57 @@ export class MusicBrainzClient {
         if (!recording.id) continue;
         for (const isrc of recording.isrcs ?? []) {
           if (wanted.has(isrc) && !resolved.has(isrc)) resolved.set(isrc, recording.id);
+        }
+      }
+    }
+
+    return resolved;
+  }
+
+  /**
+   * Resolves ISRCs to an artist and title.
+   *
+   * This exists for tracks TIDAL has stopped describing. A delisted favourite leaves nothing
+   * behind but an id and — if the collection listing still carried it — an ISRC, which is not
+   * something you can search anywhere else with. MusicBrainz turns that back into a name, and
+   * a name is the only thing Soulseek understands.
+   *
+   * Same batched request as `recordingMbidsByIsrc`, because it is the same search; only the
+   * fields read out of it differ.
+   */
+  async namesByIsrc(isrcs: string[]): Promise<Map<string, RecordingName>> {
+    const resolved = new Map<string, RecordingName>();
+    const unique = [...new Set(isrcs.filter(Boolean))];
+
+    for (const batch of chunked(unique, ISRC_BATCH_SIZE)) {
+      const wanted = new Set(batch);
+      const url = new URL("/ws/2/recording", this.baseUrl);
+      url.searchParams.set("query", batch.map((isrc) => `isrc:${isrc}`).join(" OR "));
+      url.searchParams.set("limit", String(SEARCH_LIMIT));
+      url.searchParams.set("fmt", "json");
+
+      let body: SearchResponse;
+      try {
+        body = await this.get<SearchResponse>(url);
+      } catch (error) {
+        log.warn("MusicBrainz name lookup failed for a batch", {
+          isrcs: batch.length,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+
+      // Best-match first, so the first recording claiming an ISRC wins — the same rule the
+      // MBID lookup uses, and for the same reason.
+      for (const recording of body.recordings ?? []) {
+        const credit = recording["artist-credit"]?.[0];
+        const artist = credit?.artist?.name ?? credit?.name;
+        if (!recording.title || !artist) continue;
+
+        for (const isrc of recording.isrcs ?? []) {
+          if (wanted.has(isrc) && !resolved.has(isrc)) {
+            resolved.set(isrc, { artist, title: recording.title });
+          }
         }
       }
     }

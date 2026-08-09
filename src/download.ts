@@ -22,6 +22,7 @@ import {
   RAW_SUFFIX,
   type Quality,
 } from "./tidal/download.ts";
+import { runFallback, type FallbackCandidate, type FallbackReport } from "./slskd/fallback.ts";
 import { UpgradeLedger } from "./upgrades.ts";
 
 export type DownloadReport = {
@@ -50,6 +51,11 @@ export type DownloadReport = {
    * ones where that only became clear after fetching TIDAL's copy and finding it no better.
    */
   alreadyBest: number;
+  /**
+   * The Soulseek pass, when one ran. Absent when slskd is not configured, which is the
+   * default — so a zero here means "tried and got nothing", not "switched off".
+   */
+  soulseek?: FallbackReport;
 };
 
 /**
@@ -58,7 +64,15 @@ export type DownloadReport = {
  * On a dry run these are what *would* happen — the loop takes the same decisions and stops
  * short of acting on them, so a plan and a run are described by the same vocabulary.
  */
-export type DownloadOutcome = "downloaded" | "upgraded" | "skipped" | "unavailable" | "missing" | "failed";
+export type DownloadOutcome =
+  | "downloaded"
+  | "upgraded"
+  | "skipped"
+  | "unavailable"
+  | "missing"
+  /** Rescued from Soulseek after TIDAL would not serve it. */
+  | "soulseek"
+  | "failed";
 
 export type DownloadEvent = {
   /** 1-based position in the run, so the list can be read against the progress counter. */
@@ -198,6 +212,11 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
   const ledger = options.upgrade ? await UpgradeLedger.open(config.dataDir) : undefined;
   let consecutiveFailures = 0;
 
+  // Everything TIDAL turns out not to serve, collected as the run goes and handed to
+  // Soulseek at the end. Collected even when slskd is unconfigured — the list costs nothing
+  // and keeping the branch out of the loop keeps the loop about TIDAL.
+  const fallback: FallbackCandidate[] = [];
+
   log.info("Starting download", {
     tracks: selected.length,
     ...(missing.length > 0 ? { tombstoned: missing.length } : {}),
@@ -220,6 +239,7 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
       outcome: "missing",
       detail: "not in the snapshot — delisted, or not available in TIDAL_COUNTRY_CODE",
     });
+    fallback.push({ tidalId: trackId, index: index + 1, tombstone: manifest.tombstones?.[trackId] });
   }
 
   for (const [position, track] of selected.entries()) {
@@ -309,6 +329,7 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
         if (result.outcome === "unavailable") {
           report.unavailable += 1;
           emit("unavailable", "TIDAL served only a preview at every tier");
+          fallback.push({ tidalId: track.tidalId, index: index + 1, track });
         } else if (result.outcome === "not-better") {
           report.skipped += 1;
           report.skippedByTier[upgrade.tier] += 1;
@@ -345,6 +366,7 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
         if (!written) {
           report.unavailable += 1;
           emit("unavailable", "TIDAL served only a preview at every tier");
+          fallback.push({ tidalId: track.tidalId, index: index + 1, track });
         } else {
           report.downloaded += 1;
           emit("downloaded", undefined, relative(config.libraryDir, written));
@@ -384,7 +406,49 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
     await sleep(config.tidal.downloadDelayMs, options.signal);
   }
 
+  // Everything TIDAL would not serve, tried on Soulseek. Skipped entirely on a dry run, which
+  // has promised to contact nothing, and when slskd is unconfigured — which is the default.
+  if (config.slskd.url && !options.dryRun) {
+    report.soulseek = await runFallback(config, fallback, {
+      signal: options.signal,
+      onOutcome: (outcome) => {
+        if (outcome.status === "downloaded") {
+          // Counted as a download because that is what it is: the track is now in the
+          // library. `soulseek` on the event says where it came from.
+          report.downloaded += 1;
+          report.unavailable = Math.max(0, report.unavailable - 1);
+        }
+        options.onEvent?.({
+          index: outcome.index,
+          track: outcome.track,
+          outcome: outcome.status === "downloaded" ? "soulseek" : "failed",
+          detail: `soulseek: ${outcome.detail}`,
+          path: outcome.path,
+        });
+      },
+    });
+    logFallbackReport(report.soulseek);
+  }
+
   return report;
+}
+
+function logFallbackReport(report: FallbackReport): void {
+  log.info("Soulseek fallback finished", { ...report });
+
+  if (report.unsearchable > 0) {
+    log.warn(
+      "Some delisted tracks could not be searched for: the snapshot has no ISRC for them, so " +
+        "there is no way to find out what they were called",
+      { unsearchable: report.unsearchable },
+    );
+  }
+
+  if (report.queued > 0) {
+    log.info("Some transfers are still queued on slskd; a later run will file them", {
+      queued: report.queued,
+    });
+  }
 }
 
 /** An upgrade worth attempting: what is on disk, what a download should beat it with. */
