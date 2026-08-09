@@ -459,6 +459,28 @@ Entitlement is per track, so `--quality=hires` walks down through `lossless` →
 rather than failing: a Hi-Res request on a lossless-only track returns a preview, not an
 error, and writing a 30-second file would be worse than taking the tier actually on offer.
 
+### When a track in your collection cannot be fetched
+
+Two kinds, and they mean different things:
+
+- **`unavailable`** — TIDAL served a preview at *every* tier. The catalogue has the track and
+  the snapshot describes it, but this account is not entitled to the full stream: licensing
+  lapsed for your market, or the player client is not granted playback for it.
+- **`missing`** — the snapshot carries no metadata for it at all, because TIDAL would not
+  return any when the export ran. Delisted since you favourited it, or region-locked out of
+  `TIDAL_COUNTRY_CODE`. There is no artist, album or title, so there is no path to write a
+  file to and nothing to ask for; these are never attempted.
+
+The second used to be invisible. Those tracks were dropped before the run started — not
+counted, not reported, just absent from the total, so a 123-track collection would quietly
+report "120 considered" and never say why. They are now counted in the total and listed
+individually with their TIDAL id, ahead of everything else, since they are known as soon as
+the snapshot is read. `export` records the same tracks as `# unresolved TIDAL track <id>` in
+the `.m3u8` files and in its **Unresolved / tombstoned** figure.
+
+A whole batch of metadata can also fail transiently — ids are looked up twenty at a time —
+which reads as twenty `missing` tracks for that run. The next snapshot picks them up.
+
 ### Upgrading what you already have
 
 ```bash

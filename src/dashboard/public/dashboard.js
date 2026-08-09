@@ -561,7 +561,7 @@ function renderDownloadStep(backup) {
   $("progress-track").classList.toggle("is-live", running);
 
   if (total > 0) {
-    const tally = { downloaded: 0, upgraded: 0, skipped: 0, unavailable: 0, failed: 0 };
+    const tally = { downloaded: 0, upgraded: 0, skipped: 0, unavailable: 0, missing: 0, failed: 0 };
     for (const event of events) tally[event.outcome] = (tally[event.outcome] ?? 0) + 1;
 
     for (const [outcome, count] of Object.entries(tally)) {
@@ -613,6 +613,8 @@ function renderDownloadStep(backup) {
           ...(report.upgraded > 0 || request?.upgrade ? [["Upgraded", report.upgraded, "replaced"]] : []),
           ["Skipped", report.skipped, "already on disk"],
           ["Unavailable", report.unavailable, "preview only"],
+          // Only shown when there are some: a constant zero is noise on a healthy collection.
+          ...(report.missing > 0 ? [["Missing", report.missing, "not in the snapshot"]] : []),
           ["Failed", report.failed],
           ["Total", report.total, "considered"],
         ]
@@ -626,6 +628,10 @@ const OUTCOME_LABEL = {
   upgraded: ["upgraded", "to replace"],
   skipped: ["skipped", "already there"],
   unavailable: ["unavailable", "unavailable"],
+  // Reads the same either way — a tombstoned track is no more fetchable on a real run than on
+  // a dry one — and matches the readout's column, with the row's own detail saying what it
+  // means. Spelling it out here wrapped the tag onto two lines and doubled the row's height.
+  missing: ["missing", "missing"],
   failed: ["failed", "failed"],
 };
 
@@ -762,6 +768,13 @@ function describeReport(report, request, backup) {
   }
   if (report.unavailable > 0) {
     parts.push(`${plural(report.unavailable, "track")} were preview-only — the account is not entitled to them.`);
+  }
+  if (report.missing > 0) {
+    parts.push(
+      `${plural(report.missing, "track")} carry no metadata in the snapshot and were never ` +
+        "attempted — delisted since you favourited them, or not sold in your country. The " +
+        "export keeps their ids.",
+    );
   }
   if (parts.length === 0) parts.push(`Everything in ${backup.libraryDir} is up to date.`);
   return parts.join(" ");

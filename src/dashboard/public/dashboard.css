@@ -831,6 +831,9 @@ a:hover {
 .seg-upgraded { background: #7fb2f0; }
 .seg-skipped { background: var(--tide-deep); }
 .seg-unavailable { background: var(--amber); }
+/* Muted and desaturated: nothing was attempted and nothing went wrong with the run — the
+   track simply is not there to fetch. It should not read as a failure. */
+.seg-missing { background: #6b6f78; }
 .seg-failed { background: var(--coral); }
 
 /* The unfilled remainder drifts while a track is in flight. A download can sit on one track
@@ -995,6 +998,7 @@ a:hover {
 .event-downloaded .event-tag { color: var(--tide); }
 .event-upgraded .event-tag { color: #7fb2f0; }
 .event-unavailable .event-tag { color: var(--amber); }
+.event-missing .event-tag { color: #9aa0aa; }
 .event-skipped .event-tag { color: var(--text-faint); }
 .event-skipped .event-track { color: var(--text-dim); }
 

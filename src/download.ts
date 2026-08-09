@@ -33,6 +33,11 @@ export type DownloadReport = {
   skippedByTier: Record<MatchTier, number>;
   /** TIDAL would only serve a preview — not entitled at any tier. */
   unavailable: number;
+  /**
+   * In the source list, but the snapshot carries no metadata for them — delisted or
+   * region-locked, so there is nothing to fetch and nowhere to put it. Never attempted.
+   */
+  missing: number;
   failed: number;
   /** True when the run was stopped by hand before it reached the end of the list. */
   stopped: boolean;
@@ -53,7 +58,7 @@ export type DownloadReport = {
  * On a dry run these are what *would* happen — the loop takes the same decisions and stops
  * short of acting on them, so a plan and a run are described by the same vocabulary.
  */
-export type DownloadOutcome = "downloaded" | "upgraded" | "skipped" | "unavailable" | "failed";
+export type DownloadOutcome = "downloaded" | "upgraded" | "skipped" | "unavailable" | "missing" | "failed";
 
 export type DownloadEvent = {
   /** 1-based position in the run, so the list can be read against the progress counter. */
@@ -159,13 +164,16 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
   const session = options.dryRun ? undefined : await DeviceSession.open(config);
   if (session && !session.isAuthenticated) throw new DeviceNotAuthenticatedError();
 
-  const selected = select(manifest, options);
+  const { tracks: selected, missing } = select(manifest, options);
   const report: DownloadReport = {
-    total: selected.length,
+    // Tombstones are counted in the total on purpose: they are part of what was asked for,
+    // and leaving them out is what made them invisible.
+    total: selected.length + missing.length,
     downloaded: 0,
     skipped: 0,
     skippedByTier: { exact: 0, "album-agnostic": 0, loose: 0 },
     unavailable: 0,
+    missing: 0,
     failed: 0,
     stopped: false,
     upgraded: 0,
@@ -192,6 +200,7 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
 
   log.info("Starting download", {
     tracks: selected.length,
+    ...(missing.length > 0 ? { tombstoned: missing.length } : {}),
     quality: options.quality,
     library: config.libraryDir,
     source: options.playlist ?? "collection",
@@ -200,16 +209,32 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
     ...(ledger ? { knownUpgradeAttempts: ledger.size } : {}),
   });
 
-  for (const [index, track] of selected.entries()) {
+  // Reported first, and before anything is fetched: they are known the moment the snapshot is
+  // read, and they are the answer to "why is this run shorter than my collection?".
+  for (const [index, trackId] of missing.entries()) {
+    report.missing += 1;
+    log.warn("No metadata in the snapshot, so there is nothing to fetch", { trackId });
+    options.onEvent?.({
+      index: index + 1,
+      track: `TIDAL track ${trackId}`,
+      outcome: "missing",
+      detail: "not in the snapshot — delisted, or not available in TIDAL_COUNTRY_CODE",
+    });
+  }
+
+  for (const [position, track] of selected.entries()) {
+    // Continues the numbering past the tombstones, so an event's index still reads against
+    // the progress counter and the total.
+    const index = position + missing.length;
     if (options.signal?.aborted) {
       report.stopped = true;
-      log.info("Download stopped by request", { after: index, of: selected.length });
+      log.info("Download stopped by request", { after: index, of: report.total });
       break;
     }
 
     options.onProgress?.({
       index: index + 1,
-      total: selected.length,
+      total: report.total,
       track: label(track),
       downloaded: report.downloaded,
       skipped: report.skipped,
@@ -263,7 +288,7 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
       continue;
     }
 
-    log.info(`[${index + 1}/${selected.length}] ${label(track)}${upgrade ? " (upgrade)" : ""}`);
+    log.info(`[${index + 1}/${report.total}] ${label(track)}${upgrade ? " (upgrade)" : ""}`);
 
     try {
       // Unreachable on a dry run: the loop `continue`s above before it gets here.
@@ -350,7 +375,7 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
       if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
         throw new DownloadError(
           `${consecutiveFailures} tracks in a row failed, so this is the run and not the ` +
-            `tracks — stopping instead of working through ${selected.length - index - 1} more. ` +
+            `tracks — stopping instead of working through ${selected.length - position - 1} more. ` +
             `Last error: ${message}`,
         );
       }
@@ -684,8 +709,18 @@ async function readManifest(config: Config): Promise<ExportManifest> {
   }
 }
 
-/** Resolves the requested source to an ordered, de-duplicated list of tracks. */
-function select(manifest: ExportManifest, options: DownloadOptions): ExportedTrack[] {
+/**
+ * Resolves the requested source to an ordered, de-duplicated list of tracks, plus the ids of
+ * the ones the snapshot could not describe.
+ *
+ * Those are reported rather than quietly dropped. A tombstoned track is one TIDAL would not
+ * return metadata for when the snapshot was taken — delisted since you favourited it, or
+ * region-locked out of `TIDAL_COUNTRY_CODE` — so there is no artist, album or title, and
+ * therefore no path to write a file to. They are also the most interesting tracks in a
+ * collection, being the ones that stopped existing, and a download that silently left them
+ * out of its own arithmetic was the last place you would notice.
+ */
+function select(manifest: ExportManifest, options: DownloadOptions): { tracks: ExportedTrack[]; missing: string[] } {
   let trackIds: string[];
 
   if (options.playlist) {
@@ -702,15 +737,26 @@ function select(manifest: ExportManifest, options: DownloadOptions): ExportedTra
 
   const seen = new Set<string>();
   const tracks: ExportedTrack[] = [];
+  const missing: string[] = [];
+
   for (const trackId of trackIds) {
     if (seen.has(trackId)) continue;
     seen.add(trackId);
-    // Tombstoned tracks have no metadata, so there is no path to write them to.
+
     const track = manifest.tracks[trackId];
-    if (track) tracks.push(track);
+    if (!track) {
+      missing.push(trackId);
+      continue;
+    }
+
+    tracks.push(track);
+    // The limit caps what is fetched, and stopping here rather than slicing afterwards keeps
+    // a limited run describing the stretch of the collection it actually looked at instead of
+    // reporting every tombstone in the whole of it.
+    if (options.limit && tracks.length >= options.limit) break;
   }
 
-  return options.limit ? tracks.slice(0, options.limit) : tracks;
+  return { tracks, missing };
 }
 
 function label(track: ExportedTrack): string {
@@ -755,6 +801,15 @@ export function logDownloadReport(report: DownloadReport): void {
     log.warn("Some tracks were preview-only — the account is not entitled to them at any tier", {
       unavailable: report.unavailable,
     });
+  }
+
+  if (report.missing > 0) {
+    log.warn(
+      "Some tracks are in the source list but carry no metadata in the snapshot, so they were " +
+        "never attempted — delisted since you favourited them, or not available in your " +
+        "country. The export records them as tombstones with their ids",
+      { missing: report.missing },
+    );
   }
 }
 

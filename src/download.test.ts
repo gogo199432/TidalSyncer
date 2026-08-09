@@ -58,8 +58,16 @@ let root: string;
 // biome-ignore lint/suspicious/noExplicitAny: the loaded config, shaped by env
 let config: any;
 
-/** One track, which TIDAL's catalogue claims to have in hi-res. */
-async function seed(existing: { args: string[]; extension: string }): Promise<string> {
+/**
+ * One track, which TIDAL's catalogue claims to have in hi-res.
+ *
+ * `tombstones` are ids in the collection that the snapshot has no metadata for — what a
+ * delisted or region-locked track looks like once `export` has been past it.
+ */
+async function seed(
+  existing: { args: string[]; extension: string },
+  tombstones: string[] = [],
+): Promise<string> {
   root = await mkdtemp(join(tmpdir(), "upgrade-loop-"));
 
   const libraryDir = join(root, "library");
@@ -75,7 +83,8 @@ async function seed(existing: { args: string[]; extension: string }): Promise<st
       exportedAt: new Date().toISOString(),
       countryCode: "NL",
       playlists: [],
-      favoriteIds: ["3"],
+      // The tombstones come first, so a limited run has to walk past them.
+      favoriteIds: [...tombstones, "3"],
       tracks: {
         "3": {
           tidalId: "3",
@@ -414,6 +423,84 @@ describe.if(hasFfmpeg)("pruning what an upgrade retired", () => {
     await run({ dryRun: true });
 
     expect(await exists(stale)).toBe(true);
+  });
+});
+
+/**
+ * A track TIDAL would not describe when the snapshot was taken has no artist, album or title,
+ * so there is no path to write a file to and nothing to fetch. It used to be dropped before
+ * the run started — not unavailable, not failed, just absent from the total — which made the
+ * download the last place you would notice that something in your collection had gone.
+ */
+describe.if(hasFfmpeg)("tracks the snapshot cannot describe", () => {
+  const events = async (overrides: Record<string, unknown> = {}) => {
+    const seen: { index: number; track: string; outcome: string; detail?: string }[] = [];
+    const report = await run({ ...overrides, onEvent: (event: unknown) => seen.push(event as never) });
+    return { report, seen };
+  };
+
+  beforeEach(() => {
+    served = HIRES_FLAC;
+  });
+
+  test("counts them, rather than quietly shrinking the run", async () => {
+    await seed(CD_FLAC, ["delisted-1", "delisted-2"]);
+
+    const report = await run();
+
+    // Three things were asked for; one of them was fetchable.
+    expect(report.total).toBe(3);
+    expect(report.missing).toBe(2);
+    expect(report.upgraded).toBe(1);
+  });
+
+  test("names each one, with its id and why", async () => {
+    await seed(CD_FLAC, ["delisted-1"]);
+
+    const { seen } = await events();
+
+    const tombstone = seen.find((event) => event.outcome === "missing");
+    expect(tombstone?.track).toBe("TIDAL track delisted-1");
+    expect(tombstone?.detail).toContain("delisted");
+    // Reported before anything is fetched — it is the answer to "why is this run short?".
+    expect(tombstone?.index).toBe(1);
+  });
+
+  test("numbers the fetchable ones after them, so the events read against the total", async () => {
+    await seed(CD_FLAC, ["delisted-1", "delisted-2"]);
+
+    const { seen } = await events();
+
+    expect(seen.map((event) => event.index)).toEqual([1, 2, 3]);
+    expect(seen[2]?.outcome).toBe("upgraded");
+  });
+
+  test("never tries to fetch one", async () => {
+    await seed(CD_FLAC, ["delisted-1", "delisted-2"]);
+
+    await run();
+
+    expect(calls.map((call) => call.trackId)).toEqual(["3"]);
+  });
+
+  test("a limited run reports only the tombstones it actually walked past", async () => {
+    await seed(CD_FLAC, ["delisted-1"]);
+
+    // The limit caps what is fetched; the run still has to account for what it stepped over
+    // on the way, and nothing beyond that.
+    const report = await run({ limit: 1 });
+
+    expect(report.missing).toBe(1);
+    expect(report.total).toBe(2);
+  });
+
+  test("a dry run says the same, having read the same snapshot", async () => {
+    await seed(CD_FLAC, ["delisted-1"]);
+
+    const report = await run({ dryRun: true });
+
+    expect(report.missing).toBe(1);
+    expect(report.total).toBe(2);
   });
 });
 
