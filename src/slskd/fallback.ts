@@ -8,7 +8,7 @@ import { log } from "../logger.ts";
 import { MusicBrainzClient } from "../musicbrainz.ts";
 import { isSucceeded, SlskdClient, SlskdError, type SlskdTransfer } from "./client.ts";
 import { extensionOf, pick, searchText, type WantedTrack } from "./match.ts";
-import { PendingTransfers } from "./pending.ts";
+import { PendingTransfers, type PendingTransfer } from "./pending.ts";
 
 /**
  * The second half of a download run: everything TIDAL would not serve, tried on Soulseek.
@@ -66,10 +66,12 @@ export type FallbackOptions = {
 };
 
 /**
- * How often to ask slskd how a transfer is going. It is a service on your own network and
- * this only runs for tracks TIDAL refused, so the poll is cheap and there are never many.
+ * How often to ask slskd how the queued transfers are going while draining them.
+ *
+ * Slower than a per-track poll would need to be, because one cycle now asks about every peer
+ * at once and the thing being waited on is a stranger deciding to open an upload slot.
  */
-const TRANSFER_POLL_MS = 1000;
+const DRAIN_POLL_MS = 2000;
 
 export async function runFallback(
   config: Config,
@@ -89,6 +91,11 @@ export async function runFallback(
   const pending = await PendingTransfers.open(config.dataDir);
   // Same reconciliation the TIDAL half does: prefer the artist folder already on disk.
   const directories = new DirectoryNames(config.libraryDir);
+  // Queued this run, awaited together once the whole list has been sent.
+  const waiting = new Map<
+    string,
+    { record: PendingTransfer; onFiled: (path: string) => void; onFailed: (why: string) => void }
+  >();
 
   // Anything a previous run left running comes first: it may already be sitting finished in
   // the library under a stranger's filename, waiting to be given its proper one.
@@ -133,9 +140,28 @@ export async function runFallback(
 
     try {
       const target = await directories.resolve(entry.target);
-      const outcome = await fetchOne(config, client, pending, candidate.tidalId, { ...entry, target }, options);
-      report[outcome.counter] += 1;
-      emit({ status: outcome.status, detail: outcome.detail, path: outcome.path });
+      const result = await enqueueOne(config, client, candidate.tidalId, { ...entry, target });
+
+      if (result.status === "not-found") {
+        report.notFound += 1;
+        emit({ status: "not-found", detail: result.detail });
+        continue;
+      }
+
+      // Written down before anything is awaited, so a run killed between here and the drain
+      // still leaves the transfer collectable rather than orphaned on slskd.
+      await pending.add(candidate.tidalId, result.record);
+      waiting.set(candidate.tidalId, {
+        record: result.record,
+        onFiled: (path) => {
+          report.downloaded += 1;
+          emit({ status: "downloaded", detail: result.detail, path });
+        },
+        onFailed: (why) => {
+          report.failed += 1;
+          emit({ status: "failed", detail: why });
+        },
+      });
     } catch (error) {
       report.failed += 1;
       const message = error instanceof SlskdError ? error.message : String(error);
@@ -149,6 +175,25 @@ export async function runFallback(
         break;
       }
     }
+  }
+
+  // Everything is queued; now watch the lot of them together.
+  await drain(config, client, pending, waiting, options);
+
+  // Whatever is still going when the budget expires stays in the ledger. That is not a
+  // failure — a peer's queue is a third party's business, and the next run collects it.
+  for (const [tidalId, entry] of waiting) {
+    report.queued += 1;
+    const candidate = candidates.find((c) => c.tidalId === tidalId);
+    options.onOutcome?.({
+      tidalId,
+      index: candidate?.index ?? 0,
+      track: wanted.get(tidalId)
+        ? `${wanted.get(tidalId)!.track.artist} - ${wanted.get(tidalId)!.track.title}`
+        : `TIDAL track ${tidalId}`,
+      status: "queued",
+      detail: `still queued on slskd (${entry.record.username}); a later run will file it`,
+    });
   }
 
   return report;
@@ -206,30 +251,34 @@ async function resolveNames(config: Config, candidates: FallbackCandidate[]): Pr
   return resolved;
 }
 
-type FetchResult = {
-  status: FallbackOutcome["status"];
-  counter: "downloaded" | "notFound" | "queued";
-  detail: string;
-  path?: string;
-};
+type EnqueueResult =
+  | { status: "queued"; record: PendingTransfer; detail: string }
+  | { status: "not-found"; detail: string };
 
-/** Search, choose, enqueue, and wait — up to a point. */
-async function fetchOne(
+/**
+ * Searches, chooses, and queues — without waiting for a byte of it.
+ *
+ * Waiting used to happen here, per track, which made one peer's queue everybody's problem: a
+ * track sitting in "Queued, Remotely" behind a stranger's upload slots held up every track
+ * after it, and ten of those was ten times the timeout spent doing nothing. Whether a
+ * transfer starts is entirely a third party's decision, so it cannot be on the critical path.
+ */
+async function enqueueOne(
   config: Config,
   client: SlskdClient,
-  pending: PendingTransfers,
   tidalId: string,
   { track, target }: Resolved,
-  options: FallbackOptions,
-): Promise<FetchResult> {
+): Promise<EnqueueResult> {
   const responses = await client.search(searchText(track));
   const candidate = pick(responses, track, config.slskd.losslessOnly);
 
   if (!candidate) {
-    const detail = responses.length === 0
-      ? "nobody answered the search"
-      : `${responses.length} peers answered, none convincingly`;
-    return { status: "not-found", counter: "notFound", detail };
+    return {
+      status: "not-found",
+      detail: responses.length === 0
+        ? "nobody answered the search"
+        : `${responses.length} peers answered, none convincingly`,
+    };
   }
 
   // Told to land beside where the TIDAL copy would have gone. slskd appends the peer's own
@@ -243,60 +292,86 @@ async function fetchOne(
     detail: candidate.reason,
   });
 
-  const record = {
-    username: candidate.username,
-    remoteFilename: candidate.file.filename,
-    destination,
-    target,
-    queuedAt: new Date().toISOString(),
+  return {
+    status: "queued",
+    detail: candidate.reason,
+    record: {
+      username: candidate.username,
+      remoteFilename: candidate.file.filename,
+      destination,
+      target,
+      queuedAt: new Date().toISOString(),
+    },
   };
-
-  const finished = await waitForTransfer(config, client, record, options);
-  if (!finished) {
-    await pending.add(tidalId, record);
-    return {
-      status: "queued",
-      counter: "queued",
-      detail: `queued behind ${candidate.reason}; a later run will file it`,
-    };
-  }
-
-  const path = await fileIntoLibrary(config, record);
-  if (!path) {
-    return { status: "not-found", counter: "notFound", detail: "slskd reported success but no file appeared" };
-  }
-
-  return { status: "downloaded", counter: "downloaded", detail: candidate.reason, path };
 }
 
 /**
- * Waits for one transfer, and gives up on the clock rather than on the transfer.
+ * Watches everything queued this run at once, until they are all done or the budget runs out.
  *
- * Returning false does not mean failure — it means slskd is still working and this run is
- * not going to sit through it. The caller notes it and a later run collects the file.
+ * One budget for the whole batch rather than one per track: the point of queueing everything
+ * first is that the waiting overlaps, and a per-track timeout would put it back end to end.
+ * Whatever is still going when the time is up stays in the ledger for a later run — nothing
+ * is cancelled, because a transfer that has been queued for an hour is often about to start.
  */
-async function waitForTransfer(
+async function drain(
   config: Config,
   client: SlskdClient,
-  record: { username: string; remoteFilename: string },
+  pending: PendingTransfers,
+  waiting: Map<string, { record: PendingTransfer; onFiled: (path: string) => void; onFailed: (why: string) => void }>,
   options: FallbackOptions,
-): Promise<boolean> {
+): Promise<void> {
+  if (waiting.size === 0) return;
+
   const deadline = Date.now() + config.slskd.transferTimeoutMs;
+  // Scaled to the budget so a short one still gets several looks rather than one; capped so a
+  // long one does not turn into a busy loop against slskd.
+  const poll = Math.max(250, Math.min(DRAIN_POLL_MS, Math.floor(config.slskd.transferTimeoutMs / 4)));
 
-  while (Date.now() < deadline && !options.signal?.aborted) {
-    await Bun.sleep(TRANSFER_POLL_MS);
+  log.info("Waiting on Soulseek transfers", {
+    transfers: waiting.size,
+    budgetMs: config.slskd.transferTimeoutMs,
+    pollMs: poll,
+  });
 
-    const transfer = findTransfer(await client.transfers(record.username), record.remoteFilename);
-    // Gone from the list entirely: slskd prunes completed transfers on its own retention
-    // schedule, so an absent one has most likely finished and been tidied away.
-    if (!transfer) return true;
-    if (!transfer.state.includes("Completed")) continue;
+  while (waiting.size > 0 && Date.now() < deadline && !options.signal?.aborted) {
+    await Bun.sleep(poll);
 
-    if (isSucceeded(transfer.state)) return true;
-    throw new SlskdError(`the transfer ended as "${transfer.state}"`);
+    // One request per peer rather than one per transfer: several tracks often come from the
+    // same well-stocked share, and slskd answers for all of that peer's downloads at once.
+    const byUser = new Map<string, SlskdTransfer[]>();
+    for (const { record } of waiting.values()) {
+      if (byUser.has(record.username)) continue;
+      try {
+        byUser.set(record.username, await client.transfers(record.username));
+      } catch (error) {
+        log.debug("Could not poll a peer's transfers", { user: record.username, error: String(error) });
+      }
+    }
+
+    for (const [tidalId, entry] of [...waiting]) {
+      const transfers = byUser.get(entry.record.username);
+      if (!transfers) continue;
+
+      const transfer = findTransfer(transfers, entry.record.remoteFilename);
+      // Gone from the list entirely: slskd prunes completed transfers on its own retention
+      // schedule, so an absent one has most likely finished and been tidied away.
+      const finished = !transfer || transfer.state.includes("Completed");
+      if (!finished) continue;
+
+      waiting.delete(tidalId);
+
+      if (transfer && !isSucceeded(transfer.state)) {
+        await pending.remove(tidalId);
+        entry.onFailed(`the transfer ended as "${transfer.state}"`);
+        continue;
+      }
+
+      const path = await fileIntoLibrary(config, entry.record);
+      await pending.remove(tidalId);
+      if (path) entry.onFiled(path);
+      else entry.onFailed("slskd reported success but no file appeared");
+    }
   }
-
-  return false;
 }
 
 /** slskd reports the peer's path; compare on the basename so separators cannot matter. */

@@ -521,11 +521,17 @@ absent and the next run tries again. An mp3 is not — nothing will ever upgrade
 does not have, so the library keeps it for good. `SLSKD_LOSSLESS_ONLY=true` refuses lossy
 outright if you would rather have the gap.
 
-**Slow transfers are left running, not cancelled.** Soulseek queues are measured in hours and
-a download run is not, so anything still going after `SLSKD_TRANSFER_TIMEOUT_MS` (10 minutes
-by default) is recorded in `DATA_DIR/slskd-pending.json` and filed into the library by
-whichever later run finds it finished. Cancelling would mean never getting the slow ones,
-which for these tracks usually means never getting them.
+**Nothing waits on one peer.** Every track is searched for and queued first, then the whole
+batch is watched together — because whether a transfer *starts* is a stranger's decision, and
+one track sitting in `Queued, Remotely` behind forty other people must not hold up the rest of
+the list. `SLSKD_TRANSFER_TIMEOUT_MS` (10 minutes by default) is therefore a budget for the
+batch, not for each track.
+
+**Slow transfers are left running, not cancelled.** Anything still going when that budget
+expires is recorded in `DATA_DIR/slskd-pending.json` and filed into the library by whichever
+later run finds it finished — the ledger is written the moment a transfer is queued, so a run
+killed mid-wait leaves it collectable rather than orphaned. Cancelling would mean never
+getting the slow ones, which for these tracks usually means never getting them.
 
 **Where the file lands.** slskd is told to download into the track's own `Artist/Album`
 directory, and the finished file is then renamed to the name the library expects — keeping the

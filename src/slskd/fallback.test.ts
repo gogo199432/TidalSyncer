@@ -89,8 +89,12 @@ beforeEach(async () => {
       }
 
       if (path.startsWith("/api/v0/transfers/downloads/") && request.method === "GET") {
-        const last = enqueued.at(-1);
-        if (!last) return Response.json([]);
+        // Every transfer slskd is holding for this peer, which is what the real one answers
+        // with — not just the most recent. Reporting only the last made a batch look like the
+        // earlier ones had vanished.
+        const user = decodeURIComponent(path.slice("/api/v0/transfers/downloads/".length));
+        const mine = enqueued.filter((e) => e.username === user);
+        if (mine.length === 0) return Response.json([]);
         const state =
           transferMode === "succeed"
             ? "Completed, Succeeded"
@@ -99,7 +103,10 @@ beforeEach(async () => {
               : "InProgress";
         // Nested the way slskd nests it, to exercise the flattening.
         return Response.json([
-          { directory: "whatever", files: [{ id: "t1", filename: last.filename, state }] },
+          {
+            directory: "whatever",
+            files: mine.map((e, i) => ({ id: `t${i}`, filename: e.filename, state })),
+          },
         ]);
       }
 
@@ -271,6 +278,74 @@ describe("transfers that do not finish while the run is waiting", () => {
     expect(enqueued).toHaveLength(1);
     expect(report.queued).toBe(1);
   }, 20_000);
+});
+
+/**
+ * Whether a Soulseek transfer ever starts is a stranger's decision — they can leave you in
+ * "Queued, Remotely" behind forty other people for hours. Waiting on that per track put a
+ * third party on the critical path of the whole run.
+ */
+describe("one track stuck in a stranger's queue", () => {
+  const three = async () => {
+    const outcomes: FallbackOutcome[] = [];
+    const track = (id: string, title: string): ExportedTrack => ({
+      tidalId: id,
+      title,
+      artists: ["Portishead"],
+      album: "Dummy",
+      path: `Portishead/Dummy/${title}.flac`,
+    });
+    const report = await runFallback(
+      config,
+      [
+        { tidalId: "1", index: 1, track: track("1", "Glory Box") },
+        { tidalId: "2", index: 2, track: track("2", "Roads") },
+        { tidalId: "3", index: 3, track: track("3", "Sour Times") },
+      ],
+      { onOutcome: (o) => outcomes.push(o) },
+    );
+    return { report, outcomes };
+  };
+
+  test("does not stop the others being queued", async () => {
+    // Every peer here is slow, so nothing completes inside the budget.
+    transferMode = "slow";
+    responses = [
+      peer("slowpeer", "@@x\\Portishead\\Glory Box.flac"),
+      peer("slowpeer", "@@x\\Portishead\\Roads.flac"),
+      peer("slowpeer", "@@x\\Portishead\\Sour Times.flac"),
+    ];
+
+    const started = Date.now();
+    const { report } = await three();
+    const elapsed = Date.now() - started;
+
+    // All three reached slskd rather than the first one absorbing the whole budget.
+    expect(enqueued).toHaveLength(3);
+    expect(report.queued).toBe(3);
+
+    // The budget is spent once for the batch, not once per track. Three tracks at 2.5s each
+    // would be 7.5s of waiting on top of the searches; one shared wait is ~2.5s.
+    expect(elapsed).toBeLessThan(3 * config.slskd.transferTimeoutMs);
+  }, 30_000);
+
+  test("lets the ones that do finish be filed while it is still queued", async () => {
+    transferMode = "succeed";
+    responses = [
+      peer("goodpeer", "@@x\\Portishead\\Glory Box.flac"),
+      peer("goodpeer", "@@x\\Portishead\\Roads.flac"),
+      peer("goodpeer", "@@x\\Portishead\\Sour Times.flac"),
+    ];
+
+    const { report } = await three();
+
+    expect(report.downloaded).toBe(3);
+    expect(await libraryFiles()).toEqual([
+      "Portishead/Dummy/Glory Box.flac",
+      "Portishead/Dummy/Roads.flac",
+      "Portishead/Dummy/Sour Times.flac",
+    ]);
+  }, 30_000);
 });
 
 describe("a transfer that goes wrong", () => {
