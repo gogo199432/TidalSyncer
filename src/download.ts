@@ -3,6 +3,7 @@ import { mkdir, readdir, readFile, rename, rm, rmdir, stat, utimes } from "node:
 import { basename, dirname, extname, join, relative } from "node:path";
 import type { Config } from "./config.ts";
 import type { ExportManifest, ExportedTrack } from "./export.ts";
+import { DirectoryNames } from "./directories.ts";
 import { LibraryIndex, type MatchTier } from "./library.ts";
 import { log } from "./logger.ts";
 import {
@@ -209,6 +210,9 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
   const allowedTiers = new Set(TIER_ORDER.slice(0, TIER_ORDER.indexOf(options.skipTier) + 1));
   // Read on dry runs too, so the plan matches what a real run would actually do rather than
   // re-proposing upgrades an earlier run already established TIDAL will not serve.
+  // Prefers the spelling of an artist or album folder already on disk over TIDAL's, so a
+  // library with `Nero` does not acquire a second `NERO` next to it.
+  const directories = new DirectoryNames(config.libraryDir);
   const ledger = options.upgrade ? await UpgradeLedger.open(config.dataDir) : undefined;
   let consecutiveFailures = 0;
 
@@ -312,7 +316,7 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
 
     try {
       // Unreachable on a dry run: the loop `continue`s above before it gets here.
-      const destination = join(config.libraryDir, track.path);
+      const destination = join(config.libraryDir, await directories.resolve(track.path));
 
       if (upgrade) {
         const result = await replace(config, session!, track, destination, upgrade, options.quality);

@@ -2,6 +2,7 @@ import type { Dirent } from "node:fs";
 import { readdir, rename, rm } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import type { Config } from "../config.ts";
+import { DirectoryNames } from "../directories.ts";
 import { libraryPathFor, type ExportedTrack, type Tombstone } from "../export.ts";
 import { log } from "../logger.ts";
 import { MusicBrainzClient } from "../musicbrainz.ts";
@@ -86,6 +87,8 @@ export async function runFallback(
 
   const client = new SlskdClient(config.slskd);
   const pending = await PendingTransfers.open(config.dataDir);
+  // Same reconciliation the TIDAL half does: prefer the artist folder already on disk.
+  const directories = new DirectoryNames(config.libraryDir);
 
   // Anything a previous run left running comes first: it may already be sitting finished in
   // the library under a stranger's filename, waiting to be given its proper one.
@@ -129,7 +132,8 @@ export async function runFallback(
     }
 
     try {
-      const outcome = await fetchOne(config, client, pending, candidate.tidalId, entry, options);
+      const target = await directories.resolve(entry.target);
+      const outcome = await fetchOne(config, client, pending, candidate.tidalId, { ...entry, target }, options);
       report[outcome.counter] += 1;
       emit({ status: outcome.status, detail: outcome.detail, path: outcome.path });
     } catch (error) {
