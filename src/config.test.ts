@@ -54,22 +54,19 @@ describe("TIDAL_REPLACED_DIR against LIBRARY_DIR", () => {
     delete process.env.DATA_DIR;
   });
 
-  test("refuses a retire directory inside the library", () => {
+  // Warned about rather than refused: the music share is often the only mount with room for
+  // gigabytes of retired files, and scanners can be told to skip a directory. Refusing would
+  // stop a working daemon over something the operator may already have handled.
+  test("allows a retire directory inside the library, since that is a reasonable choice", () => {
     process.env.LIBRARY_DIR = "/srv/music";
-    process.env.TIDAL_REPLACED_DIR = "/srv/music/replaced";
-    expect(() => loadConfig()).toThrow(/inside LIBRARY_DIR/);
+    process.env.TIDAL_REPLACED_DIR = "/srv/music/.replaced";
+    expect(loadConfig().replacedDir).toBe("/srv/music/.replaced");
   });
 
-  test("refuses the library itself", () => {
-    process.env.LIBRARY_DIR = "/srv/music";
-    process.env.TIDAL_REPLACED_DIR = "/srv/music";
-    expect(() => loadConfig()).toThrow(/inside LIBRARY_DIR/);
-  });
-
-  test("refuses it however the path is spelled", () => {
+  test("still resolves a path that climbs back into the library", () => {
     process.env.LIBRARY_DIR = "/srv/music";
     process.env.TIDAL_REPLACED_DIR = "/srv/music/../music/old";
-    expect(() => loadConfig()).toThrow(/inside LIBRARY_DIR/);
+    expect(loadConfig().replacedDir).toBe("/srv/music/old");
   });
 
   test("accepts a sibling, which is what the defaults give you", () => {

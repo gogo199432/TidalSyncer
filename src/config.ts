@@ -1,5 +1,5 @@
 import { isAbsolute, relative, resolve } from "node:path";
-import type { LogLevel } from "./logger.ts";
+import { log, type LogLevel } from "./logger.ts";
 
 export type Config = {
   listenBrainzUser: string;
@@ -272,13 +272,20 @@ export function loadConfig(): Config {
 
   // Retiring a file *into* the library is the one way an upgrade leaves you with two copies
   // of a track: the replacement under its own name, and the file it replaced still sitting
-  // where a scanner will index it. Nothing downstream can detect that, so refuse it here.
+  // where a scanner will index it.
+  //
+  // A warning rather than a refusal, because it is a perfectly reasonable thing to do on
+  // purpose — the music share is often the only mount with room for several gigabytes of
+  // retired files — and every scanner has a way to be told to ignore a directory
+  // (Navidrome's is a `.ndignore` file inside it). Refusing would stop a working daemon over
+  // something the operator may well have already handled.
   if (replacedDir && !isOutside(replacedDir, libraryDir)) {
-    throw new ConfigError(
-      `TIDAL_REPLACED_DIR (${replacedDir}) is inside LIBRARY_DIR (${libraryDir}). Upgraded ` +
-        "files are moved there, so your library would end up holding both the new copy and " +
-        "the one it replaced. Point it somewhere outside, or set it to an empty string to " +
-        "delete replaced files instead.",
+    log.warn(
+      "TIDAL_REPLACED_DIR is inside LIBRARY_DIR, so replaced files stay where your music " +
+        "server can see them — it will show both the new copy and the one it replaced. Make " +
+        "sure that directory is excluded from scanning (Navidrome: a .ndignore file in it), " +
+        "or point TIDAL_REPLACED_DIR somewhere outside the library.",
+      { replacedDir, libraryDir },
     );
   }
 
