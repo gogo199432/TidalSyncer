@@ -360,6 +360,61 @@ describe("a transfer that goes wrong", () => {
   }, 20_000);
 });
 
+/**
+ * Observed in production: 71 tracks re-fetched from Soulseek on every six-hourly run, the
+ * same paths filed two and three times over. A delisted track stays a bare id in the
+ * snapshot for ever, so the TIDAL pass can never look it up in the library — which made this
+ * the only place the "do we already have it?" question could be asked, and it was not being.
+ */
+describe("a track an earlier run already fetched", () => {
+  test("is not searched for or queued again", async () => {
+    responses = [peer("goodpeer", "@@x\\Portishead\\Glory Box.flac")];
+
+    const report = await runFallback(config, [{ tidalId: "3", index: 1, track: TRACK }], {
+      alreadyHave: () => "Portishead/Dummy/Glory Box.flac",
+    });
+
+    expect(report.alreadyPresent).toBe(1);
+    expect(report.downloaded).toBe(0);
+    expect(searches).toHaveLength(0);
+    expect(enqueued).toHaveLength(0);
+  });
+
+  test("says where it found it, so a wrong match can be argued with", async () => {
+    const outcomes: FallbackOutcome[] = [];
+    await runFallback(config, [{ tidalId: "3", index: 1, track: TRACK }], {
+      alreadyHave: () => "Portishead/Greatest Hits/Glory Box.mp3",
+      onOutcome: (o) => outcomes.push(o),
+    });
+
+    expect(outcomes[0]?.status).toBe("present");
+    expect(outcomes[0]?.detail).toContain("Portishead/Greatest Hits/Glory Box.mp3");
+  });
+
+  test("is asked about by the recovered name, which is all a tombstone has", async () => {
+    const asked: unknown[] = [];
+    responses = [peer("goodpeer", "@@x\\Portishead\\Glory Box.flac")];
+
+    await runFallback(config, [{ tidalId: "3", index: 1, track: TRACK }], {
+      alreadyHave: (t) => { asked.push(t); return undefined; },
+    });
+
+    // Artist and title, and no album: a delisted track has no album to match on, so asking
+    // with one would never hit.
+    expect(asked).toEqual([{ artists: ["Portishead"], title: "Glory Box" }]);
+    expect(enqueued).toHaveLength(1);
+  });
+
+  test("still fetches when the library does not have it", async () => {
+    responses = [peer("goodpeer", "@@x\\Portishead\\Glory Box.flac")];
+    const report = await runFallback(config, [{ tidalId: "3", index: 1, track: TRACK }], {
+      alreadyHave: () => undefined,
+    });
+    expect(report.downloaded).toBe(1);
+    expect(report.alreadyPresent).toBe(0);
+  });
+});
+
 describe("a delisted track", () => {
   test("with nothing left to search for is reported, not silently dropped", async () => {
     const report = await runFallback(config, [{ tidalId: "99", index: 1, tombstone: { title: "Gone" } }], {});

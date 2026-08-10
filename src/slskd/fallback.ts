@@ -40,6 +40,12 @@ export type FallbackReport = {
   considered: number;
   /** Fetched from Soulseek and filed into the library. */
   downloaded: number;
+  /**
+   * Already on disk, so not fetched again. Almost always something a previous run's fallback
+   * put there: a delisted track is a bare id in the snapshot, so the TIDAL pass cannot look
+   * it up in the library and only the recovered name can.
+   */
+  alreadyPresent: number;
   /** Searched, and nothing convincing came back. Worth trying again another day. */
   notFound: number;
   /** No artist and title could be recovered, so there was nothing to search with. */
@@ -54,7 +60,7 @@ export type FallbackOutcome = {
   tidalId: string;
   index: number;
   track: string;
-  status: "downloaded" | "not-found" | "unsearchable" | "queued" | "failed";
+  status: "downloaded" | "present" | "not-found" | "unsearchable" | "queued" | "failed";
   detail: string;
   /** Library-relative, set when a file actually landed. */
   path?: string;
@@ -63,6 +69,16 @@ export type FallbackOutcome = {
 export type FallbackOptions = {
   onOutcome?: (outcome: FallbackOutcome) => void;
   signal?: AbortSignal;
+  /**
+   * Whether the library already holds this recording, answered against the index the TIDAL
+   * pass built. A callback rather than the index itself, so this module needs no opinion
+   * about how the library is indexed; it returns the path of the file that already covers it.
+   *
+   * Without this the fallback re-fetches a delisted track on *every* run. The snapshot keeps
+   * calling it a bare id, so the TIDAL pass has nothing to look it up in the library with —
+   * only the name recovered from MusicBrainz here can find what an earlier run downloaded.
+   */
+  alreadyHave?: (track: { artists: string[]; title: string; album?: string }) => string | undefined;
 };
 
 /**
@@ -81,6 +97,7 @@ export async function runFallback(
   const report: FallbackReport = {
     considered: candidates.length,
     downloaded: 0,
+    alreadyPresent: 0,
     notFound: 0,
     unsearchable: 0,
     queued: 0,
@@ -135,6 +152,20 @@ export async function runFallback(
     if (pending.has(candidate.tidalId)) {
       report.queued += 1;
       emit({ status: "queued", detail: "still transferring from an earlier run" });
+      continue;
+    }
+
+    // And already *finished* by an earlier run. This is the only place the check can happen
+    // for a delisted track: the TIDAL pass never had a name to look one up with, so without
+    // it every run re-searched and re-downloaded the same tracks from the same strangers.
+    const have = options.alreadyHave?.({ artists: [entry.track.artist], title: entry.track.title });
+    if (have) {
+      report.alreadyPresent += 1;
+      log.debug("Skipping a Soulseek fetch; the library already has it", {
+        track: `${entry.track.artist} - ${entry.track.title}`,
+        path: have,
+      });
+      emit({ status: "present", detail: `already in the library at ${have}` });
       continue;
     }
 

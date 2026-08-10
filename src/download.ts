@@ -413,19 +413,42 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
   // Everything TIDAL would not serve, tried on Soulseek. Skipped entirely on a dry run, which
   // has promised to contact nothing, and when slskd is unconfigured — which is the default.
   if (config.slskd.url && !options.dryRun) {
+    // Which bucket each candidate was counted in during the TIDAL pass, so resolving one
+    // takes it out of the right one. A rescued tombstone is not an `unavailable` that
+    // stopped being unavailable.
+    const countedAs = new Map(
+      fallback.map((candidate) => [candidate.tidalId, candidate.track ? "unavailable" : "missing"] as const),
+    );
+
     report.soulseek = await runFallback(config, fallback, {
       signal: options.signal,
+      // The library index this run already built. Soulseek is the only place a delisted
+      // track can be recognised as already downloaded, because it is the only place its
+      // name is known.
+      alreadyHave: (track) => {
+        const found = library.find(track);
+        return found && allowedTiers.has(found.tier) ? library.relative(found.path) : undefined;
+      },
       onOutcome: (outcome) => {
-        if (outcome.status === "downloaded") {
-          // Counted as a download because that is what it is: the track is now in the
-          // library. `soulseek` on the event says where it came from.
-          report.downloaded += 1;
-          report.unavailable = Math.max(0, report.unavailable - 1);
+        const resolved = outcome.status === "downloaded" || outcome.status === "present";
+        if (resolved) {
+          if (countedAs.get(outcome.tidalId) === "unavailable") {
+            report.unavailable = Math.max(0, report.unavailable - 1);
+          } else {
+            report.missing = Math.max(0, report.missing - 1);
+          }
         }
+
+        // A fetched track counts as downloaded because that is what it is — it is in the
+        // library now — and `soulseek` on the event says where it came from.
+        if (outcome.status === "downloaded") report.downloaded += 1;
+        if (outcome.status === "present") report.skipped += 1;
+
         options.onEvent?.({
           index: outcome.index,
           track: outcome.track,
-          outcome: outcome.status === "downloaded" ? "soulseek" : "failed",
+          outcome:
+            outcome.status === "downloaded" ? "soulseek" : outcome.status === "present" ? "skipped" : "failed",
           detail: `soulseek: ${outcome.detail}`,
           path: outcome.path,
         });
@@ -439,6 +462,12 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
 
 function logFallbackReport(report: FallbackReport): void {
   log.info("Soulseek fallback finished", { ...report });
+
+  if (report.alreadyPresent > 0) {
+    log.info("Some were already in the library from an earlier run and were not fetched again", {
+      alreadyPresent: report.alreadyPresent,
+    });
+  }
 
   if (report.unsearchable > 0) {
     log.warn(
