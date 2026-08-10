@@ -789,6 +789,9 @@ finishes — so the first one is at most one `SYNC_SCHEDULE` away.
 - **Unchanged editions are skipped** by comparing the edition MBID and `last_modified_at`,
   so a 6-hourly schedule costs one cheap request per family most of the time.
 - **The daemon survives failures** — a failing run is logged and retried on the next tick.
+- **The startup sync is retried** — after 5s, 15s and 45s — because a container's first
+  seconds are when its network is least likely to be up. Without it, one failed connect on
+  a fresh deploy would leave the daemon idle until the next tick, up to six hours later.
 - Unmatched tracks are logged individually at `warn`.
 
 ## Layout

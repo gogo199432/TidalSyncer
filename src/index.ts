@@ -7,7 +7,7 @@ import { logDownloadReport, runDownload, DownloadError } from "./download.ts";
 import { logExportReport, runExport } from "./export.ts";
 import { runFavoritesSync } from "./favorites.ts";
 import { log, setLogLevel } from "./logger.ts";
-import { logFavoritesReport, runFailed, SyncRunner } from "./runner.ts";
+import { logFavoritesReport, runFailed, syncOnStartup, SyncRunner } from "./runner.ts";
 import { SettingsService, SettingsStore } from "./settings.ts";
 import { SyncStore } from "./store.ts";
 import { browserLogin, initAuth, NotAuthenticatedError, requireUserCredentials } from "./tidal/auth.ts";
@@ -319,11 +319,13 @@ async function commandDaemon(config: Config, settings: SettingsStore, force: boo
       })
     : undefined;
 
-  // Sync immediately so a fresh container is useful without waiting for the first tick. The
-  // backup deliberately does not join in here: it runs for hours, and a container that
-  // restarts — a redeploy, a crash loop — would spend all of its time restarting a download
-  // it never finishes. It waits for a tick, which is at most SYNC_SCHEDULE away.
-  await runner.run("startup", { force });
+  // Sync immediately so a fresh container is useful without waiting for the first tick, and
+  // retry it: the first seconds after a container starts are exactly when its network may
+  // not be up yet. The backup deliberately does not join in here: it runs for hours, and a
+  // container that restarts — a redeploy, a crash loop — would spend all of its time
+  // restarting a download it never finishes. It waits for a tick, which is at most
+  // SYNC_SCHEDULE away.
+  await syncOnStartup(runner, { force });
   log.info("Waiting for next scheduled run", { nextRun: job.nextRun()?.toISOString() ?? "never" });
 
   let stopping = false;

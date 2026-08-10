@@ -116,6 +116,51 @@ export class SyncRunner {
   }
 }
 
+/**
+ * How long to wait before each retry of the startup sync. Roughly a minute in total, which
+ * is the scale of the problem it exists for — a pod's network being a few seconds behind its
+ * process — without turning a genuinely offline host into a retry loop.
+ */
+export const STARTUP_RETRY_DELAYS_MS = [5_000, 15_000, 45_000];
+
+/**
+ * The daemon's sync-on-startup, retried.
+ *
+ * A container's first seconds are the least likely moment in its life for it to have working
+ * egress: an orchestrator starts the process as soon as the image is unpacked, and the pod's
+ * network — the CNI finishing its routes, the DNS service becoming reachable — can be a
+ * second or two behind. The first TIDAL call then fails on connect, and this run exists
+ * precisely so that a fresh deploy is useful without waiting for the first tick. Taking that
+ * one failure and going quiet until the next tick, up to six hours later on the default
+ * schedule, defeats the whole point of it.
+ *
+ * Only a whole-run failure is retried. A run that finished but had a playlist fail has
+ * already done most of its work, and repeating it would re-mirror the ones that went fine.
+ */
+export async function syncOnStartup(
+  runner: Pick<SyncRunner, "run">,
+  options: SyncOptions = {},
+  delays: number[] = STARTUP_RETRY_DELAYS_MS,
+): Promise<RunRecord | undefined> {
+  for (let attempt = 0; ; attempt += 1) {
+    const record = await runner.run("startup", options);
+    if (!record?.error) return record;
+
+    const delay = delays[attempt];
+    if (delay === undefined) {
+      log.warn("Startup sync never got through; leaving it to the schedule", { error: record.error });
+      return record;
+    }
+
+    log.warn("Startup sync failed; retrying", {
+      error: record.error,
+      attempt: attempt + 1,
+      retryInMs: delay,
+    });
+    await Bun.sleep(delay);
+  }
+}
+
 /** True when the run had anything go wrong — the CLI's exit code. */
 export function runFailed(record: RunRecord | undefined): boolean {
   if (!record) return false;
