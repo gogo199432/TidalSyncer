@@ -120,16 +120,19 @@ ListenBrainz → TIDAL side, which families were skipped) starts empty until thi
 run a sync of its own.
 
 It also carries the whole [backup path](#backing-up) — see **Doing it from the browser**
-below — so `export` and `download` never need a terminal.
+below — so `export` and `download` never need a terminal, and a
+[settings page](#changing-settings-from-the-browser) where every one of the variables in
+[Configuration](#configuration) can be changed without editing the compose file.
 
 Two things worth knowing:
 
-- **There is no login.** Anyone who can reach the port can start a sync, run a download, or
-  read the device code while one is pending — and approve that code with *their* TIDAL
-  account, leaving the daemon holding a session you did not intend. Not something to expose
-  to the internet. The compose file publishes `8081:8081`; change it to
+- **There is no login.** Anyone who can reach the port can start a sync, run a download,
+  change any setting, or read the device code while one is pending — and approve that code
+  with *their* TIDAL account, leaving the daemon holding a session you did not intend. Not
+  something to expose to the internet. The compose file publishes `8081:8081`; change it to
   `127.0.0.1:8081:8081` to keep it on the host, or set `DASHBOARD_ENABLED` to `false` to
-  serve nothing at all.
+  serve nothing at all. Secrets are write-only over this API: they can be set from the page,
+  never read back from it.
 - **A manual run cannot overlap a scheduled one.** Both go through the same runner, and a
   trigger that arrives mid-run is logged and ignored rather than queued — two concurrent
   runs would write the same TIDAL playlists. The backup half has a second runner with the
@@ -149,6 +152,14 @@ curl -X POST localhost:8081/api/backup/download \
   -H 'content-type: application/json' \
   -d '{"dryRun":true,"quality":"lossless","skipTier":"album-agnostic","limit":5}'
 curl -X POST localhost:8081/api/backup/stop     # finishes the current track, then stops
+
+curl localhost:8081/api/settings | jq       # every setting, and where its value comes from
+curl -X POST localhost:8081/api/settings \
+  -H 'content-type: application/json' \
+  -d '{"values":{"SYNC_SCHEDULE":"30 4 * * *","TIDAL_UPGRADE":"true"}}'
+curl -X POST localhost:8081/api/settings \
+  -H 'content-type: application/json' \
+  -d '{"values":{"SYNC_SCHEDULE":null}}'    # null hands one back to the environment
 ```
 
 ## Which playlists get synced
@@ -298,7 +309,9 @@ docker compose run --rm --entrypoint bun listenbrainz-tidal-sync \
 ## Configuration
 
 Secrets and personal values live in `.env` (see [`.env.example`](.env.example)); every
-other setting is documented inline in [`docker-compose.yml`](docker-compose.yml).
+other setting is documented inline in [`docker-compose.yml`](docker-compose.yml). All of
+them can also be changed from the [settings page](#changing-settings-from-the-browser),
+which saves to `DATA_DIR/settings.json` and takes precedence over both.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -319,6 +332,40 @@ other setting is documented inline in [`docker-compose.yml`](docker-compose.yml)
 | `CONTACT_EMAIL` | — | Sent in the ListenBrainz `User-Agent`, as their guidelines ask |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `DRY_RUN` | `false` | Resolve and report, never write to TIDAL |
+
+The download, upgrade and Soulseek variables are covered where they matter, under
+[Backing up](#backing-up), and inline in the compose file. All of them — these and those —
+are on the settings page below.
+
+### Changing settings from the browser
+
+**http://localhost:8081/settings** lists every variable above — plus the download, upgrade
+and Soulseek ones — with what it currently is, where that value came from, and what it
+means. Saving writes `DATA_DIR/settings.json`, and **that file wins over the environment**.
+
+Two layers rather than one because they answer different questions. The environment is how
+the container is *installed*: it belongs in the compose file, in version control, and it is
+what a fresh volume comes up with. The saved file is how the daemon is *tuned* — the cron
+expression you moved an hour later, the quality you dropped to lossless — and those should
+not need an edit-and-restart cycle. Each setting says which layer it is currently coming
+from, and **reset** on an overridden one deletes the entry, handing it back.
+
+Some things worth knowing:
+
+- **The schedule really is live.** Saving `SYNC_SCHEDULE` or `TZ` re-arms the running cron
+  job; the countdown on the status page moves to the new next run. Most other settings are
+  read when they are used, so the next run picks them up.
+- **A few need a restart**, and say so on the page: the OAuth scopes (`SYNC_FAVORITES`,
+  `TIDAL_SKIP_COLLECTION_FOR` — those need `login` run again too), the TIDAL client
+  credentials, and the dashboard's own host and port. They are saved either way and take
+  effect when the daemon next starts.
+- **Nothing is saved unless all of it holds up.** The whole overlay is parsed and validated
+  as one — a Soulseek URL with no API key, a cron expression croner will not take — and a
+  refused save changes nothing, on disk or in the running daemon.
+- **`DATA_DIR` is not on the page**, deliberately: it is where `settings.json` lives, so an
+  override that moved it would leave itself behind. It stays an environment variable.
+- **The CLI reads the same file.** A one-off `bun run download` at a terminal uses the
+  quality you set in the browser, not the one in the compose file.
 
 ### The container image
 
@@ -733,7 +780,8 @@ finishes — so the first one is at most one `SYNC_SCHEDULE` away.
 ```
 src/
   index.ts          CLI: login / sync / favorites / status / daemon / export / download
-  config.ts         env parsing and validation
+  config.ts         env parsing and validation, with the saved overlay on top
+  settings.ts       what is settable, DATA_DIR/settings.json, and applying it live
   export.ts         curation snapshot: export.json + .m3u8 per playlist
   download.ts       fills LIBRARY_DIR from the snapshot, resumable
   library.ts        index of what is already on disk, so download skips it
@@ -751,10 +799,11 @@ src/
     fallback.ts     the Soulseek pass: search, enqueue, wait, file into the library
     pending.ts      transfers still queued when a run ends, for a later run to collect
   store.ts          atomic JSON state + run history + lookup cache
+  json-file.ts      atomic write + tolerant read, shared by the stores
   logger.ts
   dashboard/
-    server.ts       status JSON, manual triggers, backup endpoints, static assets
-    public/         the page itself (no build step, no external requests)
+    server.ts       status JSON, manual triggers, backup and settings endpoints, assets
+    public/         the two pages themselves (no build step, no external requests)
   tidal/
     auth.ts         browser login, scope selection, credential guard
     device-auth.ts  the separate device-flow playback session used by download

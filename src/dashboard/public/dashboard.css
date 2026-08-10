@@ -1140,3 +1140,191 @@ a:hover {
     width: 100%;
   }
 }
+
+/* ---------- settings page ---------- */
+
+.nav-link {
+  color: var(--text-faint);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 0.62rem;
+}
+
+.nav-link:hover,
+.nav-link:focus-visible {
+  color: var(--tide);
+  border-bottom-color: var(--tide-deep);
+  outline: none;
+}
+
+.nav-link.is-current {
+  color: var(--text-dim);
+  border-bottom-color: var(--hairline-strong);
+}
+
+/* The status page's hero is a two-column countdown; here it is just the preamble. */
+.hero-plain {
+  display: block;
+}
+
+.page-title {
+  margin: 0 0 0.6rem;
+  font-size: clamp(1.5rem, 3vw, 2rem);
+  font-weight: 400;
+  letter-spacing: 0.01em;
+}
+
+.hero-plain .hero-sub {
+  max-width: 60ch;
+}
+
+.hero-plain code {
+  font-family: var(--mono);
+  font-size: 0.78em;
+  color: var(--text-dim);
+}
+
+.settings-list {
+  margin-top: 0.4rem;
+}
+
+/* Label and control side by side, so the column of names reads as a list of what there is. */
+.setting {
+  display: grid;
+  grid-template-columns: minmax(11rem, 17rem) 1fr;
+  gap: 0.6rem 2rem;
+  padding: 1.1rem 0;
+  border-top: 1px solid var(--hairline);
+}
+
+.setting:first-child {
+  border-top: none;
+}
+
+.setting-name {
+  display: block;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.setting-key {
+  margin: 0.15rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--text-faint);
+  letter-spacing: 0.04em;
+  word-break: break-all;
+}
+
+.setting-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.45rem;
+}
+
+.setting-control {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.setting-control input[type="text"],
+.setting-control input[type="number"],
+.setting-control input[type="password"],
+.setting-control select {
+  width: 100%;
+  max-width: 32rem;
+  padding: 0.55rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  color: var(--text);
+  background: var(--ink-sunken);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius);
+}
+
+.setting-control input:focus-visible,
+.setting-control select:focus-visible {
+  outline: none;
+  border-color: var(--tide-deep);
+}
+
+.toggle-tight {
+  margin-top: 0;
+  align-self: start;
+}
+
+.setting-help,
+.setting-origin {
+  margin: 0;
+  max-width: 60ch;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+.setting-origin {
+  color: var(--text-faint);
+}
+
+.setting-origin:empty {
+  display: none;
+}
+
+/* An edited row is marked on the rail rather than by recolouring it — the eye needs to find
+   the unsaved ones in a long form, not read them differently. */
+.setting.is-changed,
+.setting.is-reset {
+  box-shadow: inset 2px 0 0 var(--tide);
+  padding-left: 0.9rem;
+}
+
+.setting.is-reset {
+  box-shadow: inset 2px 0 0 var(--amber);
+}
+
+.savebar {
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
+  background: linear-gradient(to top, var(--ink) 55%, rgba(12, 14, 16, 0.85));
+  border-top: 1px solid var(--hairline);
+  backdrop-filter: blur(6px);
+}
+
+.savebar-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 0.9rem var(--gutter);
+}
+
+.savebar-note {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+
+.savebar-note.is-good { color: var(--tide); }
+.savebar-note.is-bad { color: var(--coral); }
+
+.savebar-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+@media (max-width: 42rem) {
+  .setting {
+    grid-template-columns: 1fr;
+  }
+}

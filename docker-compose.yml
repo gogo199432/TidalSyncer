@@ -4,6 +4,11 @@
 # and fill it in. Everything that is not secret is configured inline below, so .env stays
 # short. Required values use ${VAR:?...}, which makes Compose fail with a clear message
 # rather than starting a half-configured container.
+#
+# Every setting here can also be changed at http://localhost:8081/settings, which saves to
+# /data/settings.json — and that file WINS over what is written here. So a value below that
+# seems to be ignored has probably been overridden from the dashboard; the page says so for
+# each setting, and offers to hand it back.
 
 services:
   listenbrainz-tidal-sync:
@@ -101,8 +106,10 @@ services:
       # {title} is the humanised family name, e.g. "Weekly Jams".
       TIDAL_PLAYLIST_NAME_TEMPLATE: "{title} (ListenBrainz)"
 
-      # Credentials, sync state, the ISRC cache, and the `export` snapshot.
-      # Backed by the sync-data volume.
+      # Credentials, sync state, the ISRC cache, the `export` snapshot, and the settings
+      # saved from the dashboard. Backed by the sync-data volume.
+      #
+      # The one setting the dashboard cannot change, since it is where that file lives.
       DATA_DIR: /data
 
       # Where `download` writes audio, matching the bind mount above.
@@ -148,6 +155,7 @@ services:
 
       # Cron expression for the daemon. Daily Jams refreshes daily, the weekly lists on
       # Mondays, so every 6 hours picks up a new edition promptly without being wasteful.
+      # Changing this on the settings page re-arms the running daemon; no restart needed.
       SYNC_SCHEDULE: 0 */6 * * *
 
       # Back up on the same tick, right after the playlist sync: snapshot the catalogue,
@@ -159,8 +167,10 @@ services:
       BACKUP_ON_SCHEDULE: "true"
 
       # Status dashboard served by the daemon: sync stats, the next scheduled run, a button
-      # that starts one now, and the whole backup path — device login, export and download,
-      # with live progress. Set DASHBOARD_ENABLED to false to serve nothing at all.
+      # that starts one now, the whole backup path — device login, export and download, with
+      # live progress — and a settings page for everything in this block. It has no
+      # authentication, so whoever can reach the port can also change what the daemon does.
+      # Set DASHBOARD_ENABLED to false to serve nothing at all.
       DASHBOARD_ENABLED: "true"
       DASHBOARD_PORT: 8081
 

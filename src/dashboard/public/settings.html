@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en" data-state="loading">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>TidalSyncer · Settings</title>
+    <link rel="stylesheet" href="/dashboard.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>◍</text></svg>"
+    />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+
+    <header class="masthead">
+      <div class="mark">
+        <span class="mark-glyph" aria-hidden="true">◍</span>
+        <span class="mark-name">Tidal<em>Syncer</em></span>
+      </div>
+      <div class="masthead-meta">
+        <a class="nav-link" href="/">Status</a>
+        <span class="nav-link is-current" aria-current="page">Settings</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero hero-plain" aria-labelledby="settings-heading">
+        <div>
+          <h1 class="page-title" id="settings-heading">Settings</h1>
+          <!--
+            The precedence is the whole design, so it is said once, here, rather than implied
+            by badges the reader has to decode.
+          -->
+          <p class="hero-sub">
+            Everything the daemon reads from the environment. A value saved here is written to
+            <code id="settings-path">DATA_DIR/settings.json</code> and wins over the environment
+            from then on, so the compose file can go on saying something else. Reset a setting
+            to hand it back.
+          </p>
+          <p class="hero-sub" id="saved-line">&nbsp;</p>
+        </div>
+      </section>
+
+      <div id="groups"></div>
+
+      <p class="empty" id="loading">Reading the daemon's settings…</p>
+    </main>
+
+    <!--
+      Fixed rather than at the end of the page: the form is long, and a Save you have to scroll
+      to find is a Save people forget to press.
+    -->
+    <div class="savebar" id="savebar" hidden>
+      <div class="savebar-inner">
+        <p class="savebar-note" id="save-note" role="status" aria-live="polite">No changes</p>
+        <div class="savebar-actions">
+          <button type="button" id="discard-button" class="run-button run-button-quiet" disabled>
+            <span class="run-button-label">Discard</span>
+          </button>
+          <button type="button" id="save-button" class="run-button" disabled>
+            <span class="run-button-label">Save changes</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <footer class="colophon">
+      <span id="schedule-line">–</span>
+      <span id="updated-line">–</span>
+    </footer>
+
+    <script src="/settings.js" type="module"></script>
+  </body>
+</html>

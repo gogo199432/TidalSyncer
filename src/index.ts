@@ -1,13 +1,14 @@
 #!/usr/bin/env bun
 import { Cron } from "croner";
 import { BackupRunner } from "./backup.ts";
-import { ConfigError, type Config, loadConfig } from "./config.ts";
+import { ConfigError, envDataDir, type Config, loadConfig } from "./config.ts";
 import { startDashboard } from "./dashboard/server.ts";
 import { logDownloadReport, runDownload, DownloadError } from "./download.ts";
 import { logExportReport, runExport } from "./export.ts";
 import { runFavoritesSync } from "./favorites.ts";
 import { log, setLogLevel } from "./logger.ts";
 import { logFavoritesReport, runFailed, SyncRunner } from "./runner.ts";
+import { SettingsService, SettingsStore } from "./settings.ts";
 import { SyncStore } from "./store.ts";
 import { browserLogin, initAuth, NotAuthenticatedError, requireUserCredentials } from "./tidal/auth.ts";
 import type { MatchTier } from "./library.ts";
@@ -26,7 +27,9 @@ Commands:
   status     Show what is currently mirrored, without contacting TIDAL
   daemon     Sync on a schedule (SYNC_SCHEDULE, default every 6 hours), then back up on
              the same tick, and serve the status dashboard on DASHBOARD_PORT (default
-             8081). Set BACKUP_ON_SCHEDULE=false to leave the backup half to you
+             8081). Set BACKUP_ON_SCHEDULE=false to leave the backup half to you.
+             /settings on that port changes any of these without a restart; what it
+             saves goes to DATA_DIR/settings.json and outranks the environment
 
   export     Write a portable snapshot of your TIDAL curation to DATA_DIR/export:
              every owned playlist and the collection, as JSON plus .m3u8 files,
@@ -89,7 +92,11 @@ async function main(): Promise<number> {
     return command ? 0 : 1;
   }
 
-  const config = loadConfig();
+  // Anything saved from the dashboard's settings page wins over the environment, for every
+  // command and not just the daemon — a one-off `download` at a terminal should use the same
+  // quality the schedule does, whichever way that was set.
+  const settings = await SettingsStore.open(envDataDir());
+  const config = loadConfig(settings.values());
   setLogLevel(config.logLevel);
 
   switch (command) {
@@ -103,7 +110,7 @@ async function main(): Promise<number> {
     case "status":
       return await commandStatus(config, args.includes("--unresolved"));
     case "daemon":
-      return await commandDaemon(config, force);
+      return await commandDaemon(config, settings, force);
     case "export":
       return await commandExport(config);
     case "download-login":
@@ -255,7 +262,7 @@ async function commandDownload(config: Config, options: Parameters<typeof runDow
   return report.failed > 0 ? 1 : 0;
 }
 
-async function commandDaemon(config: Config, force: boolean): Promise<number> {
+async function commandDaemon(config: Config, settings: SettingsStore, force: boolean): Promise<number> {
   await initAuth(config);
   await requireUserCredentials();
 
@@ -269,10 +276,16 @@ async function commandDaemon(config: Config, force: boolean): Promise<number> {
   // fill the library from it. Both halves ignore a trigger that arrives mid-run, so a tick
   // landing on top of a long one — a download of a whole collection runs for hours — is a
   // no-op rather than a collision, and the backup is simply picked up by the following tick.
-  const job = new Cron(config.schedule, { timezone: config.timezone }, async () => {
-    await runner.run("schedule", { force });
-    backup.startScheduled();
-  });
+  //
+  // Rebuilt rather than fixed at startup: the settings page can change the expression, and a
+  // schedule you have to restart the container to apply is not really a setting.
+  const schedule = () =>
+    new Cron(config.schedule, { timezone: config.timezone }, async () => {
+      await runner.run("schedule", { force });
+      backup.startScheduled();
+    });
+
+  let job = schedule();
 
   log.info("Daemon started", {
     schedule: config.schedule,
@@ -281,8 +294,29 @@ async function commandDaemon(config: Config, force: boolean): Promise<number> {
     nextRun: job.nextRun()?.toISOString() ?? "never",
   });
 
+  // Every other setting is read from the live config each time it is used, so saving is all
+  // it takes. The tick is the exception: croner has already computed when to fire.
+  const settingsService = new SettingsService(settings, config, (next, previous) => {
+    if (next.schedule === previous.schedule && next.timezone === previous.timezone) return;
+
+    job.stop();
+    job = schedule();
+    log.info("Rescheduled", {
+      schedule: next.schedule,
+      timezone: next.timezone,
+      nextRun: job.nextRun()?.toISOString() ?? "never",
+    });
+  });
+
   const dashboard = config.dashboard.enabled
-    ? startDashboard({ config, store, runner, backup, nextRun: () => job.nextRun() })
+    ? startDashboard({
+        config,
+        store,
+        runner,
+        backup,
+        settings: settingsService,
+        nextRun: () => job.nextRun(),
+      })
     : undefined;
 
   // Sync immediately so a fresh container is useful without waiting for the first tick. The

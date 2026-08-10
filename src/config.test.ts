@@ -22,6 +22,41 @@ afterEach(() => {
   process.env = saved;
 });
 
+/**
+ * The settings page saves an overlay of the same strings the environment holds, and hands it
+ * to the loader — so everything below applies to a value set in the browser too.
+ */
+describe("the saved overlay", () => {
+  afterEach(() => {
+    delete process.env.SYNC_SCHEDULE;
+    delete process.env.TIDAL_REPLACED_DIR;
+  });
+
+  test("outranks the environment", () => {
+    process.env.SYNC_SCHEDULE = "0 */6 * * *";
+    expect(loadConfig({ SYNC_SCHEDULE: "15 3 * * *" }).schedule).toBe("15 3 * * *");
+  });
+
+  test("is validated exactly as the environment is", () => {
+    expect(() => loadConfig({ TIDAL_COUNTRY_CODE: "HUN" })).toThrow(/alpha-2/);
+    expect(() => loadConfig({ TIDAL_REPLACED_RETENTION_DAYS: "1.5" })).toThrow(/must be an integer/);
+  });
+
+  test("can say “delete replaced files” over an environment that names a directory", () => {
+    process.env.TIDAL_REPLACED_DIR = "/srv/retired";
+    // "" is a decision, not an absent value — the distinction has to survive the overlay.
+    expect(loadConfig({ TIDAL_REPLACED_DIR: "" }).replacedDir).toBe("");
+    expect(loadConfig({}).replacedDir).toBe("/srv/retired");
+  });
+
+  // Bun's process.env is a live object with special cases behind it, and copying it loses
+  // some of them — TZ among them, which would leave the cron job an hour or several out.
+  test("leaves the environment it does not override alone, TZ included", () => {
+    process.env.TZ = "Europe/Budapest";
+    expect(loadConfig({ SYNC_SCHEDULE: "15 3 * * *" }).timezone).toBe(process.env.TZ);
+  });
+});
+
 describe("source patch selection", () => {
   test("defaults to the recommendation playlists only", () => {
     expect(loadConfig().sourcePatchAllowlist).toEqual([

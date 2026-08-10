@@ -5,6 +5,7 @@ import { humanizeSourcePatch } from "../listenbrainz.ts";
 import type { MatchTier } from "../library.ts";
 import { log } from "../logger.ts";
 import type { SyncRunner } from "../runner.ts";
+import { SettingsError, type SettingsPatch, type SettingsService } from "../settings.ts";
 import type { SyncStore } from "../store.ts";
 import { QUALITIES, type Quality } from "../tidal/download.ts";
 
@@ -14,6 +15,8 @@ export type DashboardDeps = {
   runner: SyncRunner;
   /** Device login, export and download — the whole backup side of the page. */
   backup: BackupRunner;
+  /** The saved overlay over the environment, and the live config it feeds. */
+  settings: SettingsService;
   /** When the daemon's cron job fires next; `null` if it never will. */
   nextRun: () => Date | null;
 };
@@ -23,24 +26,29 @@ const SKIP_TIERS: MatchTier[] = ["exact", "album-agnostic", "loose"];
 /** Static files, resolved once. Anything not listed here is a 404, not a path to read. */
 const ASSETS: Record<string, { file: string; type: string }> = {
   "/": { file: "index.html", type: "text/html; charset=utf-8" },
+  "/settings": { file: "settings.html", type: "text/html; charset=utf-8" },
   "/dashboard.css": { file: "dashboard.css", type: "text/css; charset=utf-8" },
   "/dashboard.js": { file: "dashboard.js", type: "text/javascript; charset=utf-8" },
+  "/settings.js": { file: "settings.js", type: "text/javascript; charset=utf-8" },
 };
 
 /**
- * Serves the status page and its endpoints:
+ * Serves the status page, the settings page and their endpoints:
  *
- *   GET  /api/status           everything the page renders
+ *   GET  /api/status           everything the status page renders
  *   POST /api/run              trigger a sync now (409 while one is already running)
  *   POST /api/backup/login     start the TIDAL device flow; returns the code to display
  *   POST /api/backup/download  snapshot the catalogue to DATA_DIR/export, then fetch audio
  *                              into LIBRARY_DIR from it
  *   POST /api/backup/stop      stop a running backup after the current track
+ *   GET  /api/settings         every setting, where its value comes from, and what it means
+ *   POST /api/settings         save some of them (400 with the reason if they do not hold up)
  *
  * There is no authentication. That already mattered — the page can start a sync — and it
- * matters more now: these endpoints spend a TIDAL session, write files, and display a device
- * code that whoever can see it could approve with their own account. Keep it on a network
- * you trust, or bind it to localhost with `DASHBOARD_HOST`.
+ * matters more now: these endpoints spend a TIDAL session, write files, display a device code
+ * that whoever can see it could approve with their own account, and now also change what the
+ * daemon does. Keep it on a network you trust, or bind it to localhost with `DASHBOARD_HOST`.
+ * Secrets are write-only over this API for the same reason — they go in, they never come back.
  */
 export function startDashboard(deps: DashboardDeps): Bun.Server<undefined> {
   const { config } = deps;
@@ -59,6 +67,12 @@ export function startDashboard(deps: DashboardDeps): Bun.Server<undefined> {
       if (url.pathname === "/api/run") {
         if (request.method !== "POST") return json({ error: "Use POST" }, 405);
         return triggerRun(deps, url);
+      }
+
+      if (url.pathname === "/api/settings") {
+        if (request.method === "GET") return json(deps.settings.snapshot());
+        if (request.method === "POST") return await saveSettings(deps, request);
+        return json({ error: "Use GET or POST" }, 405);
       }
 
       if (url.pathname.startsWith("/api/backup/")) {
@@ -135,6 +149,49 @@ async function handleBackup(deps: DashboardDeps, action: string, request: Reques
     default:
       return json({ error: "Not found" }, 404);
   }
+}
+
+/**
+ * Saves settings, or says why they were refused.
+ *
+ * The whole overlay is validated as one — by building the `Config` it would produce — so a
+ * combination that cannot start the daemon is a 400 here rather than a crash on the next
+ * tick. Nothing is written unless it holds up, and the reply is the fresh snapshot rather
+ * than an acknowledgement, so the page redraws from what the daemon now believes.
+ */
+async function saveSettings(deps: DashboardDeps, request: Request): Promise<Response> {
+  let body: Record<string, unknown>;
+  try {
+    body = ((await request.json()) ?? {}) as Record<string, unknown>;
+  } catch {
+    return json({ error: "Body must be JSON" }, 400);
+  }
+
+  const values = body.values;
+  if (typeof values !== "object" || values === null || Array.isArray(values)) {
+    return json({ error: "Body must be {\"values\": {SETTING: \"value\" | null}}" }, 400);
+  }
+
+  const patch: SettingsPatch = {};
+  for (const [key, value] of Object.entries(values as Record<string, unknown>)) {
+    if (value === null) {
+      patch[key] = null;
+      continue;
+    }
+    // Numbers and booleans are what a JSON client naturally sends; the overlay stores text.
+    if (typeof value === "object") return json({ error: `${key} must be a string or null` }, 400);
+    patch[key] = String(value);
+  }
+
+  try {
+    await deps.settings.update(patch);
+  } catch (error) {
+    if (error instanceof SettingsError) return json({ error: error.message }, 400);
+    log.error("Could not save settings", { error: error instanceof Error ? error.message : String(error) });
+    return json({ error: "Could not save settings; see the daemon log" }, 500);
+  }
+
+  return json(deps.settings.snapshot());
 }
 
 /** Validates the form the page posts, so a bad field is a 400 and never a crashed daemon. */

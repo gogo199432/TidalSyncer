@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { BackupRunner } from "../backup.ts";
 import { loadConfig, type Config } from "../config.ts";
 import { SyncRunner } from "../runner.ts";
+import { SETTINGS, SettingsService, SettingsStore } from "../settings.ts";
 import { SyncStore } from "../store.ts";
 import { startDashboard } from "./server.ts";
 
@@ -19,6 +20,7 @@ let root: string;
 let config: Config;
 let server: Bun.Server<undefined>;
 let base: string;
+let settings: SettingsService;
 
 const TRACKS = {
   "1": { tidalId: "1", title: "Karma Police", artists: ["Radiohead"], album: "OK Computer", path: "Radiohead/OK Computer/Karma Police.flac" },
@@ -56,6 +58,12 @@ beforeAll(async () => {
     }),
   );
 
+  // Bun loads the repo's own .env, which would otherwise decide half of these tests — a
+  // developer with TIDAL_DEVICE_CLIENT_ID set would see the backup panel configured.
+  for (const group of SETTINGS) {
+    for (const field of group.fields) delete process.env[field.key];
+  }
+
   Object.assign(process.env, {
     LISTENBRAINZ_USER: "tester",
     TIDAL_CLIENT_ID: "test-client",
@@ -77,11 +85,13 @@ beforeAll(async () => {
 
   const store = await SyncStore.open(config.dataDir);
   const backup = await BackupRunner.create(config);
+  settings = new SettingsService(await SettingsStore.open(config.dataDir), config);
   server = startDashboard({
     config,
     store,
     runner: new SyncRunner(config, store),
     backup,
+    settings,
     nextRun: () => null,
   });
   base = `http://127.0.0.1:${server.port}`;
@@ -236,6 +246,63 @@ describe("backup endpoints", () => {
     expect((await post("/api/backup/download", { dryRun: true, playlist: "Nope" })).status).toBe(202);
     const backup = await settle();
     expect(backup.download.error).toContain("No exported playlist");
+  });
+});
+
+/**
+ * The settings page is a form over the same `Config` every runner holds, so what matters here
+ * is that a save reaches it — and that a refused one changes nothing.
+ */
+describe("settings endpoints", () => {
+  const put = (values: Record<string, string | null>) => post("/api/settings", { values });
+
+  test("serves every setting with where its value came from", async () => {
+    const snapshot = await body(await get("/api/settings"));
+    const fields = snapshot.groups.flatMap((group: Snapshot) => group.fields);
+
+    // Unset in both layers, so the box is empty and the built-in default is what the page
+    // shows as its placeholder — typing nothing has to keep meaning "leave it to the daemon".
+    const schedule = fields.find((field: Snapshot) => field.key === "SYNC_SCHEDULE");
+    expect(schedule.value).toBe("");
+    expect(schedule.fallback).toBe("0 */6 * * *");
+    expect(schedule.source).toBe("default");
+
+    // Set in this suite's environment, so the page can say so and offer nothing to reset.
+    const library = fields.find((field: Snapshot) => field.key === "LIBRARY_DIR");
+    expect(library.source).toBe("env");
+    expect(library.overridden).toBe(false);
+  });
+
+  test("rejects a GET-shaped body and an unknown setting", async () => {
+    expect((await post("/api/settings", { SYNC_SCHEDULE: "0 4 * * *" })).status).toBe(400);
+    expect((await put({ NONSENSE: "1" })).status).toBe(400);
+  });
+
+  test("a save reaches the config the daemon is running on", async () => {
+    const response = await put({ TIDAL_SKIP_TIER: "loose" });
+    expect(response.status).toBe(200);
+
+    expect(config.skipTier).toBe("loose");
+    // And the status page's own defaults follow it, since they read the same object.
+    expect((await backupStatus()).defaults.skipTier).toBe("loose");
+
+    await put({ TIDAL_SKIP_TIER: null });
+    expect(config.skipTier).toBe("album-agnostic");
+  });
+
+  test("says why a refused save was refused, and changes nothing", async () => {
+    const response = await put({ SYNC_SCHEDULE: "every thursday" });
+
+    expect(response.status).toBe(400);
+    expect((await body(response)).error).toContain("SYNC_SCHEDULE");
+    expect(config.schedule).toBe("0 */6 * * *");
+  });
+
+  test("never sends a secret back to the page", async () => {
+    expect((await put({ LISTENBRAINZ_TOKEN: "shh" })).status).toBe(200);
+
+    expect(await (await get("/api/settings")).text()).not.toContain("shh");
+    await put({ LISTENBRAINZ_TOKEN: null });
   });
 });
 

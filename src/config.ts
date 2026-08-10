@@ -150,31 +150,62 @@ const SKIP_TIERS = new Set(["exact", "album-agnostic", "loose"]);
 
 class ConfigError extends Error {}
 
-function required(key: string): string {
-  const value = process.env[key]?.trim();
-  if (!value) throw new ConfigError(`Missing required environment variable ${key}`);
-  return value;
-}
+/**
+ * The environment, with the settings page's saved overlay on top. The overlay wins, so a
+ * value changed in the browser survives the compose file continuing to say something else —
+ * see src/settings.ts. The same parsing and validation applies to either layer, since they
+ * hold the same strings.
+ *
+ * `process.env` is read a key at a time rather than copied: under Bun it is a live object
+ * with special cases behind it — `{ ...process.env }` loses a `TZ` that was assigned by the
+ * process itself — and a config layer that quietly disagrees with the environment about the
+ * timezone is a schedule that fires at the wrong hour.
+ */
+class Env {
+  constructor(private readonly overrides: Record<string, string>) {}
 
-function optional(key: string, fallback: string): string {
-  const value = process.env[key]?.trim();
-  return value ? value : fallback;
-}
-
-function boolean(key: string, fallback: boolean): boolean {
-  const value = process.env[key]?.trim().toLowerCase();
-  if (value === undefined || value === "") return fallback;
-  return value === "1" || value === "true" || value === "yes";
-}
-
-function integer(key: string, fallback: number, min: number, max: number): number {
-  const value = process.env[key]?.trim();
-  if (!value) return fallback;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
-    throw new ConfigError(`${key} must be an integer between ${min} and ${max} (got "${value}")`);
+  /** The untrimmed entry, for the one setting where "" and absent mean different things. */
+  raw(key: string): string | undefined {
+    return Object.hasOwn(this.overrides, key) ? this.overrides[key] : process.env[key];
   }
-  return parsed;
+
+  required(key: string): string {
+    const value = this.raw(key)?.trim();
+    if (!value) throw new ConfigError(`Missing required environment variable ${key}`);
+    return value;
+  }
+
+  optional(key: string, fallback: string): string {
+    const value = this.raw(key)?.trim();
+    return value ? value : fallback;
+  }
+
+  boolean(key: string, fallback: boolean): boolean {
+    const value = this.raw(key)?.trim().toLowerCase();
+    if (value === undefined || value === "") return fallback;
+    return value === "1" || value === "true" || value === "yes";
+  }
+
+  integer(key: string, fallback: number, min: number, max: number): number {
+    const value = this.raw(key)?.trim();
+    if (!value) return fallback;
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+      throw new ConfigError(`${key} must be an integer between ${min} and ${max} (got "${value}")`);
+    }
+    return parsed;
+  }
+
+  list(key: string, fallback: string[]): string[] {
+    const value = this.raw(key)?.trim();
+    if (!value) return fallback;
+    // `*` opts back in to every family `createdfor` returns, historical lists included.
+    if (value === "*") return [];
+    return value
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
 }
 
 /**
@@ -192,53 +223,59 @@ function isOutside(path: string, root: string): boolean {
   return inside !== "" && (inside.startsWith("..") || isAbsolute(inside));
 }
 
-function list(key: string, fallback: string[]): string[] {
-  const value = process.env[key]?.trim();
-  if (!value) return fallback;
-  // `*` opts back in to every family `createdfor` returns, historical lists included.
-  if (value === "*") return [];
-  return value
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
+/**
+ * Where the settings overlay, the sync state and the caches live.
+ *
+ * Read from the environment alone, deliberately: it is the directory the overlay itself is
+ * stored in, so letting the overlay move it would leave the settings behind in the old one.
+ */
+export function envDataDir(): string {
+  return resolve(process.env.DATA_DIR?.trim() || "./data");
 }
 
-export function loadConfig(): Config {
-  const logLevel = optional("LOG_LEVEL", "info");
+/**
+ * `overrides` is the settings page's saved overlay. It is applied on top of the environment
+ * rather than parsed separately, so everything below — the defaults, the validation, the
+ * relationships between settings — holds however a value arrived.
+ */
+export function loadConfig(overrides: Record<string, string> = {}): Config {
+  const env = new Env(overrides);
+
+  const logLevel = env.optional("LOG_LEVEL", "info");
   if (!LOG_LEVELS.has(logLevel)) {
     throw new ConfigError(`LOG_LEVEL must be one of debug, info, warn, error (got "${logLevel}")`);
   }
 
-  const access = optional("TIDAL_PLAYLIST_ACCESS", "PRIVATE").toUpperCase();
+  const access = env.optional("TIDAL_PLAYLIST_ACCESS", "PRIVATE").toUpperCase();
   // The TIDAL API models "private" playlists as UNLISTED; accept the friendlier word too.
   const playlistAccess = access === "PUBLIC" ? "PUBLIC" : "UNLISTED";
 
-  const countryCode = optional("TIDAL_COUNTRY_CODE", "US").toUpperCase();
+  const countryCode = env.optional("TIDAL_COUNTRY_CODE", "US").toUpperCase();
   if (!/^[A-Z]{2}$/.test(countryCode)) {
     throw new ConfigError(`TIDAL_COUNTRY_CODE must be an ISO 3166-1 alpha-2 code (got "${countryCode}")`);
   }
 
-  const redirectUri = optional("TIDAL_REDIRECT_URI", "http://localhost:8080/callback");
+  const redirectUri = env.optional("TIDAL_REDIRECT_URI", "http://localhost:8080/callback");
   try {
     new URL(redirectUri);
   } catch {
     throw new ConfigError(`TIDAL_REDIRECT_URI must be an absolute URL (got "${redirectUri}")`);
   }
 
-  const downloadQuality = optional("TIDAL_DOWNLOAD_QUALITY", "lossless").toLowerCase();
+  const downloadQuality = env.optional("TIDAL_DOWNLOAD_QUALITY", "lossless").toLowerCase();
   if (!DOWNLOAD_QUALITIES.has(downloadQuality)) {
     throw new ConfigError(
       `TIDAL_DOWNLOAD_QUALITY must be one of ${[...DOWNLOAD_QUALITIES].join(", ")} (got "${downloadQuality}")`,
     );
   }
 
-  const skipTier = optional("TIDAL_SKIP_TIER", "album-agnostic").toLowerCase();
+  const skipTier = env.optional("TIDAL_SKIP_TIER", "album-agnostic").toLowerCase();
   if (!SKIP_TIERS.has(skipTier)) {
     throw new ConfigError(`TIDAL_SKIP_TIER must be one of ${[...SKIP_TIERS].join(", ")} (got "${skipTier}")`);
   }
 
-  const syncFavorites = boolean("SYNC_FAVORITES", false);
-  const listenBrainzToken = optional("LISTENBRAINZ_TOKEN", "");
+  const syncFavorites = env.boolean("SYNC_FAVORITES", false);
+  const listenBrainzToken = env.optional("LISTENBRAINZ_TOKEN", "");
   if (syncFavorites && !listenBrainzToken) {
     throw new ConfigError(
       "SYNC_FAVORITES needs LISTENBRAINZ_TOKEN — writing loved recordings to your account " +
@@ -246,22 +283,23 @@ export function loadConfig(): Config {
     );
   }
 
-  const libraryDir = resolve(optional("LIBRARY_DIR", "./library"));
+  const libraryDir = resolve(env.optional("LIBRARY_DIR", "./library"));
   // Resolved only when set, so "" stays "" and means delete rather than resolving to cwd.
-  const replacedDir = process.env.TIDAL_REPLACED_DIR?.trim()
-    ? resolve(process.env.TIDAL_REPLACED_DIR.trim())
-    : process.env.TIDAL_REPLACED_DIR === ""
+  const retireTo = env.raw("TIDAL_REPLACED_DIR");
+  const replacedDir = retireTo?.trim()
+    ? resolve(retireTo.trim())
+    : retireTo === ""
       ? ""
-      : resolve(optional("DATA_DIR", "./data"), "replaced");
+      : resolve(envDataDir(), "replaced");
 
-  const slskdUrl = optional("SLSKD_URL", "");
+  const slskdUrl = env.optional("SLSKD_URL", "");
   if (slskdUrl) {
     try {
       new URL(slskdUrl);
     } catch {
       throw new ConfigError(`SLSKD_URL must be an absolute URL (got "${slskdUrl}")`);
     }
-    if (!process.env.SLSKD_API_KEY?.trim()) {
+    if (!env.raw("SLSKD_API_KEY")?.trim()) {
       throw new ConfigError(
         "SLSKD_URL is set but SLSKD_API_KEY is empty. slskd's API needs a key with the " +
           "`readwrite` role — searching and enqueueing both change state, and a read-only " +
@@ -290,53 +328,53 @@ export function loadConfig(): Config {
   }
 
   return {
-    listenBrainzUser: required("LISTENBRAINZ_USER"),
-    listenBrainzApiUrl: optional("LISTENBRAINZ_API_URL", "https://api.listenbrainz.org"),
+    listenBrainzUser: env.required("LISTENBRAINZ_USER"),
+    listenBrainzApiUrl: env.optional("LISTENBRAINZ_API_URL", "https://api.listenbrainz.org"),
     listenBrainzToken,
-    musicBrainzApiUrl: optional("MUSICBRAINZ_API_URL", "https://musicbrainz.org"),
-    sourcePatchAllowlist: list("LISTENBRAINZ_SOURCE_PATCHES", RECOMMENDATION_SOURCE_PATCHES),
+    musicBrainzApiUrl: env.optional("MUSICBRAINZ_API_URL", "https://musicbrainz.org"),
+    sourcePatchAllowlist: env.list("LISTENBRAINZ_SOURCE_PATCHES", RECOMMENDATION_SOURCE_PATCHES),
     tidal: {
-      clientId: required("TIDAL_CLIENT_ID"),
-      clientSecret: required("TIDAL_CLIENT_SECRET"),
+      clientId: env.required("TIDAL_CLIENT_ID"),
+      clientSecret: env.required("TIDAL_CLIENT_SECRET"),
       redirectUri,
       countryCode,
-      skipCollectionFor: list("TIDAL_SKIP_COLLECTION_FOR", []),
-      playlistNameTemplate: optional("TIDAL_PLAYLIST_NAME_TEMPLATE", "{title} (ListenBrainz)"),
+      skipCollectionFor: env.list("TIDAL_SKIP_COLLECTION_FOR", []),
+      playlistNameTemplate: env.optional("TIDAL_PLAYLIST_NAME_TEMPLATE", "{title} (ListenBrainz)"),
       playlistAccess,
-      deviceClientId: optional("TIDAL_DEVICE_CLIENT_ID", ""),
-      deviceClientSecret: optional("TIDAL_DEVICE_CLIENT_SECRET", ""),
-      downloadDelayMs: integer("TIDAL_DOWNLOAD_DELAY_MS", 3000, 0, 600_000),
+      deviceClientId: env.optional("TIDAL_DEVICE_CLIENT_ID", ""),
+      deviceClientSecret: env.optional("TIDAL_DEVICE_CLIENT_SECRET", ""),
+      downloadDelayMs: env.integer("TIDAL_DOWNLOAD_DELAY_MS", 3000, 0, 600_000),
     },
     libraryDir,
     downloadQuality: downloadQuality as Config["downloadQuality"],
     skipTier: skipTier as Config["skipTier"],
-    upgrade: boolean("TIDAL_UPGRADE", false),
+    upgrade: env.boolean("TIDAL_UPGRADE", false),
     replacedDir,
-    replacedRetentionDays: integer("TIDAL_REPLACED_RETENTION_DAYS", 7, 0, 3650),
+    replacedRetentionDays: env.integer("TIDAL_REPLACED_RETENTION_DAYS", 7, 0, 3650),
     slskd: {
       url: slskdUrl,
-      apiKey: optional("SLSKD_API_KEY", ""),
+      apiKey: env.optional("SLSKD_API_KEY", ""),
       // Same share by default, which is the arrangement that lets a finished download be
       // renamed into place rather than copied across a filesystem boundary.
-      downloadsDir: resolve(optional("SLSKD_DOWNLOADS_DIR", libraryDir)),
-      searchTimeoutMs: integer("SLSKD_SEARCH_TIMEOUT_MS", 20_000, 5_000, 120_000),
-      requestTimeoutMs: integer("SLSKD_REQUEST_TIMEOUT_MS", 30_000, 1_000, 300_000),
-      transferTimeoutMs: integer("SLSKD_TRANSFER_TIMEOUT_MS", 600_000, 0, 86_400_000),
-      losslessOnly: boolean("SLSKD_LOSSLESS_ONLY", false),
+      downloadsDir: resolve(env.optional("SLSKD_DOWNLOADS_DIR", libraryDir)),
+      searchTimeoutMs: env.integer("SLSKD_SEARCH_TIMEOUT_MS", 20_000, 5_000, 120_000),
+      requestTimeoutMs: env.integer("SLSKD_REQUEST_TIMEOUT_MS", 30_000, 1_000, 300_000),
+      transferTimeoutMs: env.integer("SLSKD_TRANSFER_TIMEOUT_MS", 600_000, 0, 86_400_000),
+      losslessOnly: env.boolean("SLSKD_LOSSLESS_ONLY", false),
     },
     syncFavorites,
-    dataDir: resolve(optional("DATA_DIR", "./data")),
-    schedule: optional("SYNC_SCHEDULE", "0 */6 * * *"),
-    backupOnSchedule: boolean("BACKUP_ON_SCHEDULE", true),
-    timezone: optional("TZ", "UTC"),
+    dataDir: envDataDir(),
+    schedule: env.optional("SYNC_SCHEDULE", "0 */6 * * *"),
+    backupOnSchedule: env.boolean("BACKUP_ON_SCHEDULE", true),
+    timezone: env.optional("TZ", "UTC"),
     dashboard: {
-      enabled: boolean("DASHBOARD_ENABLED", true),
-      host: optional("DASHBOARD_HOST", "0.0.0.0"),
-      port: integer("DASHBOARD_PORT", 8081, 1, 65535),
+      enabled: env.boolean("DASHBOARD_ENABLED", true),
+      host: env.optional("DASHBOARD_HOST", "0.0.0.0"),
+      port: env.integer("DASHBOARD_PORT", 8081, 1, 65535),
     },
-    contactEmail: optional("CONTACT_EMAIL", "listenbrainz-tidal-sync@localhost"),
+    contactEmail: env.optional("CONTACT_EMAIL", "listenbrainz-tidal-sync@localhost"),
     logLevel: logLevel as LogLevel,
-    dryRun: boolean("DRY_RUN", false),
+    dryRun: env.boolean("DRY_RUN", false),
   };
 }
 
