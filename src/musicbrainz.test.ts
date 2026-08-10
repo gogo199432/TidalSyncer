@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { MusicBrainzClient } from "./musicbrainz.ts";
+import { chooseRelease, MusicBrainzClient, type MbRelease } from "./musicbrainz.ts";
 
 const REAL_FETCH = globalThis.fetch;
 
@@ -68,5 +68,64 @@ describe("MusicBrainzClient.recordingMbidsByIsrc", () => {
     const client = new MusicBrainzClient("https://mb.test", "test/1.0");
 
     expect((await client.recordingMbidsByIsrc(["AAAA00000000"])).size).toBe(0);
+  });
+});
+
+/**
+ * A popular recording is on a dozen releases: the original album, its reissues, and a
+ * scattering of compilations. Taking the first would file a track under whichever DJ mix
+ * MusicBrainz happened to list first.
+ */
+describe("chooseRelease", () => {
+  const album = (title: string, extra: Partial<MbRelease> = {}): MbRelease => ({
+    title,
+    status: "Official",
+    "release-group": { "primary-type": "Album" },
+    ...extra,
+  });
+
+  test("lets the reissues vote for the album they are reissues of", () => {
+    // The shape of the real answer for "Infected Mushroom — Becoming Insane": four pressings
+    // of Vicious Delicious against one compilation appearance.
+    expect(
+      chooseRelease([
+        album("Vicious Delicious", { date: "2025-11-27" }),
+        album("Vicious Delicious", { date: "2007-04-30" }),
+        album("Psy Hi Volume 1 - BNE Hits", { date: "2007-11" }),
+        album("Vicious Delicious", { date: "2007-04-01" }),
+        album("Vicious Delicious", { date: "2011" }),
+      ]),
+    ).toBe("Vicious Delicious");
+  });
+
+  test("drops compilations before counting, where MusicBrainz labels them", () => {
+    expect(
+      chooseRelease([
+        album("Now That's What I Call Music", { "release-group": { "primary-type": "Album", "secondary-types": ["Compilation"] } }),
+        album("Now That's What I Call Music", { "release-group": { "primary-type": "Album", "secondary-types": ["Compilation"] } }),
+        album("Dummy", { date: "1994" }),
+      ]),
+    ).toBe("Dummy");
+  });
+
+  test("prefers the earliest pressing when nothing else separates them", () => {
+    expect(chooseRelease([album("Later", { date: "2001" }), album("Earlier", { date: "1994" })])).toBe("Earlier");
+  });
+
+  test("ignores unofficial releases unless they are all there is", () => {
+    expect(
+      chooseRelease([
+        album("Bootleg", { status: "Bootleg" }),
+        album("Bootleg", { status: "Bootleg" }),
+        album("The Real Album", { date: "1999" }),
+      ]),
+    ).toBe("The Real Album");
+    expect(chooseRelease([album("Bootleg", { status: "Bootleg" })])).toBe("Bootleg");
+  });
+
+  test("says nothing rather than guessing when there are no releases", () => {
+    // The caller then files under "Unknown Album", which is at least honest.
+    expect(chooseRelease([])).toBeUndefined();
+    expect(chooseRelease([{ status: "Official" }])).toBeUndefined();
   });
 });

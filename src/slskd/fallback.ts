@@ -273,9 +273,9 @@ async function resolveNames(config: Config, candidates: FallbackCandidate[]): Pr
     if (!name) continue;
     resolved.set(tidalId, {
       track: { artist: name.artist, title: name.title },
-      // No album survives a delisting, so these land under "Unknown Album" — which is at
-      // least honest, and is where a later re-tag would look for them anyway.
-      target: libraryPathFor(name.artist, undefined, name.title),
+      // MusicBrainz knows which release the recording belongs to, so a delisted track lands
+      // beside the rest of its album rather than in a heap under "Unknown Album".
+      target: libraryPathFor(name.artist, name.album, name.title),
     });
   }
 

@@ -29,14 +29,69 @@ type SearchResponse = {
     score?: number;
     isrcs?: string[];
     "artist-credit"?: Array<{ name?: string; artist?: { name?: string } }>;
+    releases?: MbRelease[];
   }>;
 };
 
-/** Enough to search for a recording somewhere that is not TIDAL. */
+/** One of the releases a recording appears on, as the search endpoint reports it. */
+export type MbRelease = {
+  title?: string;
+  status?: string;
+  date?: string;
+  "release-group"?: { "primary-type"?: string; "secondary-types"?: string[] };
+};
+
+/** Enough to search for a recording somewhere that is not TIDAL, and to file the result. */
 export type RecordingName = {
   artist: string;
   title: string;
+  /** The release it most plausibly belongs to. Absent when MusicBrainz lists none. */
+  album?: string;
 };
+
+/**
+ * Picks which release a recording belongs to, out of the many it appears on.
+ *
+ * A popular track is on a dozen: the original album, three reissues of it, and a scattering
+ * of compilations and DJ mixes. The reissues share the original's title, so *the most
+ * frequently named title wins* — four editions of "Vicious Delicious" outvote one appearance
+ * on "Psy Hi Volume 1 - BNE Hits", which is exactly the intuition that the album a recording
+ * keeps turning up on is the album it came from.
+ *
+ * Compilations are dropped first where MusicBrainz labels them, and unofficial releases where
+ * anything official exists, so bootlegs cannot outvote the real thing by sheer number.
+ */
+export function chooseRelease(releases: MbRelease[]): string | undefined {
+  const named = releases.filter((release) => release.title);
+  if (named.length === 0) return undefined;
+
+  const notCompilation = named.filter(
+    (release) => !release["release-group"]?.["secondary-types"]?.includes("Compilation"),
+  );
+  const pool = notCompilation.length > 0 ? notCompilation : named;
+
+  const official = pool.filter((release) => release.status === "Official");
+  const candidates = official.length > 0 ? official : pool;
+
+  const counts = new Map<string, { count: number; earliest: string }>();
+  for (const release of candidates) {
+    const title = release.title!;
+    const seen = counts.get(title);
+    const date = release.date ?? "9999";
+    if (seen) {
+      seen.count += 1;
+      if (date < seen.earliest) seen.earliest = date;
+    } else {
+      counts.set(title, { count: 1, earliest: date });
+    }
+  }
+
+  // Most appearances wins; the earliest pressing breaks a tie, since that is the edition the
+  // others are reissues of.
+  return [...counts.entries()].sort(
+    (a, b) => b[1].count - a[1].count || a[1].earliest.localeCompare(b[1].earliest),
+  )[0]?.[0];
+}
 
 export class MusicBrainzClient {
   private nextRequestAt = 0;
@@ -131,9 +186,10 @@ export class MusicBrainzClient {
         const artist = credit?.artist?.name ?? credit?.name;
         if (!recording.title || !artist) continue;
 
+        const album = chooseRelease(recording.releases ?? []);
         for (const isrc of recording.isrcs ?? []) {
           if (wanted.has(isrc) && !resolved.has(isrc)) {
-            resolved.set(isrc, { artist, title: recording.title });
+            resolved.set(isrc, { artist, title: recording.title, album });
           }
         }
       }

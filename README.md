@@ -496,9 +496,16 @@ Both kinds of track that TIDAL cannot give you are tried:
 
 - **`unavailable`** — full metadata, so the search terms are exact.
 - **`missing`** — delisted, and all that survives is a TIDAL id plus whatever the *collection*
-  listing carried. If that included an ISRC, MusicBrainz turns it back into an artist and
-  title, which is the only thing Soulseek understands. Tombstones with no ISRC are reported as
-  `unsearchable` rather than guessed at.
+  listing carried. If that included an ISRC, MusicBrainz turns it back into an artist, title
+  and album — the only thing Soulseek understands is a name, and the album is what stops these
+  piling up under `Unknown Album`. A recording is usually on a dozen releases, so the most
+  frequently named title wins: four pressings of an album outvote one compilation appearance.
+  Tombstones with no ISRC are reported as `unsearchable` rather than guessed at.
+
+A track already in the library is **not fetched again**. That check can only happen after the
+name is recovered, because a delisted track stays a bare id in the snapshot for ever and the
+TIDAL pass has nothing to look it up with — without it, every run re-downloaded the same
+tracks from the same strangers.
 
 It runs as a second pass after the TIDAL loop, never inside it, and never on a dry run.
 
