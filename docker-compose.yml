@@ -168,7 +168,8 @@ services:
 
       # Status dashboard served by the daemon: sync stats, the next scheduled run, a button
       # that starts one now, the whole backup path — device login, export and download, with
-      # live progress — and a settings page for everything in this block. It has no
+      # live progress — a settings page for everything in this block, and the daemon's own
+      # log at /logs, so a failed run needs no `docker logs`. It has no
       # authentication, so whoever can reach the port can also change what the daemon does.
       # Set DASHBOARD_ENABLED to false to serve nothing at all.
       DASHBOARD_ENABLED: "true"

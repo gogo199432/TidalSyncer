@@ -360,7 +360,7 @@ export const SETTINGS: SettingGroup[] = [
         kind: "select",
         options: ["debug", "info", "warn", "error"],
         fallback: "info",
-        help: "Applies immediately.",
+        help: "Applies immediately — turn debug on, watch the log page, turn it back off.",
       },
     ],
   },

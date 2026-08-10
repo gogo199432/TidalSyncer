@@ -3,7 +3,7 @@ import { BackupError, type BackupRunner, type DownloadRequest } from "../backup.
 import type { Config } from "../config.ts";
 import { humanizeSourcePatch } from "../listenbrainz.ts";
 import type { MatchTier } from "../library.ts";
-import { log } from "../logger.ts";
+import { log, LOG_HISTORY_LIMIT, recentLogs } from "../logger.ts";
 import type { SyncRunner } from "../runner.ts";
 import { SettingsError, type SettingsPatch, type SettingsService } from "../settings.ts";
 import type { SyncStore } from "../store.ts";
@@ -27,13 +27,15 @@ const SKIP_TIERS: MatchTier[] = ["exact", "album-agnostic", "loose"];
 const ASSETS: Record<string, { file: string; type: string }> = {
   "/": { file: "index.html", type: "text/html; charset=utf-8" },
   "/settings": { file: "settings.html", type: "text/html; charset=utf-8" },
+  "/logs": { file: "logs.html", type: "text/html; charset=utf-8" },
   "/dashboard.css": { file: "dashboard.css", type: "text/css; charset=utf-8" },
   "/dashboard.js": { file: "dashboard.js", type: "text/javascript; charset=utf-8" },
   "/settings.js": { file: "settings.js", type: "text/javascript; charset=utf-8" },
+  "/logs.js": { file: "logs.js", type: "text/javascript; charset=utf-8" },
 };
 
 /**
- * Serves the status page, the settings page and their endpoints:
+ * Serves the status, settings and log pages, and their endpoints:
  *
  *   GET  /api/status           everything the status page renders
  *   POST /api/run              trigger a sync now (409 while one is already running)
@@ -43,6 +45,7 @@ const ASSETS: Record<string, { file: string; type: string }> = {
  *   POST /api/backup/stop      stop a running backup after the current track
  *   GET  /api/settings         every setting, where its value comes from, and what it means
  *   POST /api/settings         save some of them (400 with the reason if they do not hold up)
+ *   GET  /api/logs             the daemon's own log, from `?since=` onwards
  *
  * There is no authentication. That already mattered — the page can start a sync — and it
  * matters more now: these endpoints spend a TIDAL session, write files, display a device code
@@ -67,6 +70,11 @@ export function startDashboard(deps: DashboardDeps): Bun.Server<undefined> {
       if (url.pathname === "/api/run") {
         if (request.method !== "POST") return json({ error: "Use POST" }, 405);
         return triggerRun(deps, url);
+      }
+
+      if (url.pathname === "/api/logs") {
+        if (request.method !== "GET") return json({ error: "Use GET" }, 405);
+        return json(readLogs(deps, url));
       }
 
       if (url.pathname === "/api/settings") {
@@ -149,6 +157,29 @@ async function handleBackup(deps: DashboardDeps, action: string, request: Reques
     default:
       return json({ error: "Not found" }, 404);
   }
+}
+
+/**
+ * The daemon's log, as it went to stdout.
+ *
+ * `?since=<seq>` is how the page tails it: it asks for what it has not seen rather than the
+ * whole window every poll. `dropped` says how many lines fell out of the buffer between the
+ * two calls, so a page that was left in a background tab through a download can say the log
+ * has a hole in it instead of running two distant lines together.
+ */
+function readLogs(deps: DashboardDeps, url: URL): Record<string, unknown> {
+  const asked = Number(url.searchParams.get("since") ?? 0);
+  const since = Number.isInteger(asked) && asked > 0 ? asked : 0;
+  const { entries, nextSeq, oldestSeq } = recentLogs(since);
+
+  return {
+    entries,
+    nextSeq,
+    dropped: since > 0 ? Math.max(0, oldestSeq - since - 1) : 0,
+    /** Below this nothing was written, so the page can say why a level looks empty. */
+    level: deps.config.logLevel,
+    capacity: LOG_HISTORY_LIMIT,
+  };
 }
 
 /**

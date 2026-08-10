@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BackupRunner } from "../backup.ts";
 import { loadConfig, type Config } from "../config.ts";
+import { setLogLevel } from "../logger.ts";
 import { SyncRunner } from "../runner.ts";
 import { SETTINGS, SettingsService, SettingsStore } from "../settings.ts";
 import { SyncStore } from "../store.ts";
@@ -74,10 +75,13 @@ beforeAll(async () => {
     // offering a button that cannot work.
     TIDAL_DEVICE_CLIENT_ID: "",
     TIDAL_DOWNLOAD_DELAY_MS: "0",
-    LOG_LEVEL: "error",
+    LOG_LEVEL: "info",
   });
 
   config = loadConfig();
+  // Pinned rather than left to whatever ran before: the level is process-wide and a settings
+  // save applies it, so a suite that asserts on the log buffer has to set its own.
+  setLogLevel(config.logLevel);
   // Port 0 lets the OS pick a free one, which config validation will not accept but a test
   // running alongside a real daemon needs.
   config.dashboard.port = 0;
@@ -246,6 +250,45 @@ describe("backup endpoints", () => {
     expect((await post("/api/backup/download", { dryRun: true, playlist: "Nope" })).status).toBe(202);
     const backup = await settle();
     expect(backup.download.error).toContain("No exported playlist");
+  });
+});
+
+/**
+ * The log page tails this endpoint, so what matters is that it can ask for only what it has
+ * not seen and be told how far it now is.
+ */
+describe("the log endpoint", () => {
+  test("serves the daemon's own lines, newest last", async () => {
+    const payload = await body(await get("/api/logs"));
+
+    expect(payload.entries.length).toBeGreaterThan(0);
+    expect(payload.entries.at(-1).seq).toBe(payload.nextSeq);
+    // Enough for the page to say why a level looks empty and how much is kept.
+    expect(payload.level).toBe(config.logLevel);
+    expect(payload.capacity).toBeGreaterThan(0);
+  });
+
+  test("`since` returns only what came after it", async () => {
+    const { nextSeq } = await body(await get("/api/logs"));
+    expect((await body(await get(`/api/logs?since=${nextSeq}`))).entries).toEqual([]);
+
+    // Saving a setting is one of the things the daemon logs, so it is a line to tail.
+    await post("/api/settings", { values: { TIDAL_SKIP_TIER: "loose" } });
+    const tail = await body(await get(`/api/logs?since=${nextSeq}`));
+
+    expect(tail.entries.map((entry: Snapshot) => entry.text).join("\n")).toContain("Settings saved");
+    expect(tail.entries.every((entry: Snapshot) => entry.seq > nextSeq)).toBe(true);
+    expect(tail.dropped).toBe(0);
+    await post("/api/settings", { values: { TIDAL_SKIP_TIER: null } });
+  });
+
+  test("a nonsense cursor reads as “from the beginning” rather than an error", async () => {
+    const payload = await body(await get("/api/logs?since=nonsense"));
+    expect(payload.entries.length).toBeGreaterThan(0);
+  });
+
+  test("rejects a POST", async () => {
+    expect((await post("/api/logs")).status).toBe(405);
   });
 });
 

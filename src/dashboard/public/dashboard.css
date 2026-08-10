@@ -1328,3 +1328,80 @@ a:hover {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------- log page ---------- */
+
+.log-controls {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  margin: 1rem 0 0.9rem;
+}
+
+.log-levels {
+  display: flex;
+  gap: 0.4rem;
+}
+
+/* The level chips are buttons, so they say which one is on rather than all looking alike. */
+.chip-level {
+  cursor: pointer;
+  background: none;
+  color: var(--text-faint);
+  font-family: var(--mono);
+}
+
+.chip-level:hover,
+.chip-level:focus-visible {
+  color: var(--text);
+  border-color: var(--hairline-strong);
+  outline: none;
+}
+
+.chip-level.is-on {
+  color: var(--text);
+  border-color: var(--tide-deep);
+  background: rgba(111, 214, 196, 0.08);
+}
+
+.log-search {
+  flex: 1 1 14rem;
+  max-width: 24rem;
+}
+
+.log {
+  height: min(62vh, 44rem);
+  margin: 0;
+  padding: 0.9rem 1rem;
+  overflow: auto;
+  background: var(--ink-sunken);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  line-height: 1.65;
+  color: var(--text-dim);
+  /* Wrapped rather than scrolled sideways: a download line carries a long path, and reading
+     it should not mean dragging a horizontal bar. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+}
+
+.log:focus-visible {
+  outline: none;
+  border-color: var(--tide-deep);
+}
+
+/* Inline, with a real newline after each: the <pre> then lays the log out exactly as a
+   terminal would, and selecting it copies lines rather than one run-on paragraph. */
+.log-line-debug { color: var(--text-faint); }
+.log-line-info { color: var(--text-dim); }
+.log-line-warn { color: var(--amber); }
+.log-line-error { color: var(--coral); }
+
+.log-line-gap {
+  color: var(--text-faint);
+  font-style: italic;
+}

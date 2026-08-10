@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en" data-state="loading">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>TidalSyncer · Log</title>
+    <link rel="stylesheet" href="/dashboard.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>◍</text></svg>"
+    />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+
+    <header class="masthead">
+      <div class="mark">
+        <span class="mark-glyph" aria-hidden="true">◍</span>
+        <span class="mark-name">Tidal<em>Syncer</em></span>
+      </div>
+      <div class="masthead-meta">
+        <a class="nav-link" href="/">Status</a>
+        <span class="nav-link is-current" aria-current="page">Log</span>
+        <a class="nav-link" href="/settings">Settings</a>
+        <span class="beacon" id="beacon" title="Connection to the daemon"></span>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero hero-plain" aria-labelledby="logs-heading">
+        <div>
+          <h1 class="page-title" id="logs-heading">Log</h1>
+          <p class="hero-sub">
+            What the daemon has written to its own log since it started, as it went to stdout.
+            It keeps the last <span id="capacity">2000</span> lines in memory — <code>docker
+            logs</code> has the rest — and only what <a href="/settings">LOG_LEVEL</a> allows
+            through, currently <strong id="level">info</strong>.
+          </p>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="stream-heading">
+        <div class="panel-head">
+          <h2 id="stream-heading">Output</h2>
+          <p class="panel-note" id="stream-note">waiting for the daemon…</p>
+        </div>
+
+        <div class="log-controls">
+          <div class="log-levels" id="levels" role="group" aria-label="Minimum level to show"></div>
+
+          <label class="field log-search">
+            <span class="label">Filter</span>
+            <input id="filter" type="search" placeholder="substring, e.g. Soulseek" />
+          </label>
+
+          <label class="toggle toggle-tight">
+            <input id="follow" type="checkbox" checked />
+            <span>Follow</span>
+          </label>
+        </div>
+
+        <!--
+          A <pre> of lines rather than a table: the whole point is to show the log the way the
+          terminal would, so it stays copy-pasteable into an issue.
+        -->
+        <pre class="log" id="log" tabindex="0" aria-live="off"></pre>
+        <p class="step-note" id="empty-note" hidden></p>
+      </section>
+    </main>
+
+    <footer class="colophon">
+      <span id="count-line">–</span>
+      <span id="updated-line">–</span>
+    </footer>
+
+    <script src="/logs.js" type="module"></script>
+  </body>
+</html>

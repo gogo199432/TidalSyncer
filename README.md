@@ -120,9 +120,10 @@ ListenBrainz → TIDAL side, which families were skipped) starts empty until thi
 run a sync of its own.
 
 It also carries the whole [backup path](#backing-up) — see **Doing it from the browser**
-below — so `export` and `download` never need a terminal, and a
+below — so `export` and `download` never need a terminal, a
 [settings page](#changing-settings-from-the-browser) where every one of the variables in
-[Configuration](#configuration) can be changed without editing the compose file.
+[Configuration](#configuration) can be changed without editing the compose file, and a
+[log page](#the-log-page).
 
 Two things worth knowing:
 
@@ -160,7 +161,22 @@ curl -X POST localhost:8081/api/settings \
 curl -X POST localhost:8081/api/settings \
   -H 'content-type: application/json' \
   -d '{"values":{"SYNC_SCHEDULE":null}}'    # null hands one back to the environment
+
+curl localhost:8081/api/logs | jq          # the daemon's log, as it went to stdout
+curl 'localhost:8081/api/logs?since=1240'  # only what came after that line
 ```
+
+### The log page
+
+**http://localhost:8081/logs** is the daemon's own log, live — the same lines it writes to
+stdout, wrapped, coloured by level, filterable by level and by substring, and following the
+tail until you scroll up. It is the answer to "the download stopped, what happened" without
+shelling into the container.
+
+The last 2000 lines are kept in memory; `docker logs` still has the whole history. It holds
+only what `LOG_LEVEL` let through — which the settings page can change while the daemon is
+running, so turning `debug` on for a few minutes needs no restart. Nothing is written to
+disk: the log already goes to stdout, and a second copy would be one more file to rotate.
 
 ## Which playlists get synced
 
@@ -800,10 +816,10 @@ src/
     pending.ts      transfers still queued when a run ends, for a later run to collect
   store.ts          atomic JSON state + run history + lookup cache
   json-file.ts      atomic write + tolerant read, shared by the stores
-  logger.ts
+  logger.ts         stdout, plus the last 2000 lines for the log page
   dashboard/
-    server.ts       status JSON, manual triggers, backup and settings endpoints, assets
-    public/         the two pages themselves (no build step, no external requests)
+    server.ts       status JSON, triggers, backup / settings / log endpoints, assets
+    public/         the three pages themselves (no build step, no external requests)
   tidal/
     auth.ts         browser login, scope selection, credential guard
     device-auth.ts  the separate device-flow playback session used by download
