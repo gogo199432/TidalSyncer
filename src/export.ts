@@ -1,6 +1,7 @@
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config } from "./config.ts";
+import { enrich, type Enrichment } from "./enrich.ts";
 import { log } from "./logger.ts";
 import { fetchOwnedPlaylists, fetchTrackDetails, type PlaylistDetail, type TrackDetail } from "./tidal/catalog.ts";
 import { createClient, fetchCollectionTracks } from "./tidal/client.ts";
@@ -34,6 +35,8 @@ export type ExportManifest = {
     /** Tracks whose metadata TIDAL would not return — delisted, or region-locked. */
     unresolved: number;
     withIsrc: number;
+    /** Tracks MusicBrainz could be asked about. Absent from snapshots written before this. */
+    enriched?: number;
   };
 };
 
@@ -43,6 +46,11 @@ export type ExportedTrack = TrackDetail & {
   path: string;
   /** When the user favourited it. Only set for collection tracks. */
   addedAt?: string;
+  /**
+   * What MusicBrainz knows and TIDAL does not: genre, identifiers, cover art. Absent for a
+   * track with no ISRC, one MusicBrainz has never heard of, or a run that could not reach it.
+   */
+  enrichment?: Enrichment;
 };
 
 /** What is still known about a track TIDAL has stopped describing. Both fields are optional. */
@@ -83,9 +91,26 @@ export async function runExport(config: Config): Promise<ExportResult> {
   log.info("Resolving track metadata", { tracks: referenced.length });
   const details = await fetchTrackDetails(api, config, referenced);
 
+  // Genre, MusicBrainz identifiers and cover art, for everything with an ISRC. Cached across
+  // runs, so only tracks new to the collection cost a request. Never fatal: a snapshot with
+  // no enrichment is the snapshot every earlier version wrote.
+  let enrichment = new Map<string, Enrichment>();
+  try {
+    enrichment = await enrich(config, [...details.values()]);
+  } catch (error) {
+    log.warn("Could not enrich the snapshot from MusicBrainz; tags will carry TIDAL's metadata only", {
+      error: String(error),
+    });
+  }
+
   const tracks: Record<string, ExportedTrack> = {};
   for (const [trackId, detail] of details) {
-    tracks[trackId] = { ...detail, path: libraryPath(detail), addedAt: addedAt.get(trackId) };
+    tracks[trackId] = {
+      ...detail,
+      path: libraryPath(detail),
+      addedAt: addedAt.get(trackId),
+      enrichment: enrichment.get(trackId),
+    };
   }
 
   // Whatever the collection listing still knows about the ones `/tracks` would not describe.
@@ -112,6 +137,7 @@ export async function runExport(config: Config): Promise<ExportResult> {
       uniqueTracks: referenced.length,
       unresolved: referenced.length - details.size,
       withIsrc: [...details.values()].filter((track) => track.isrc).length,
+      enriched: enrichment.size,
     },
   };
 

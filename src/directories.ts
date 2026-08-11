@@ -69,6 +69,10 @@ export class DirectoryNames {
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
+      // A dotfolder is never an artist. It is `.replaced/` or a scanner's own bookkeeping, and
+      // `normalize` strips the dot — so without this an artist called "Replaced" would have
+      // its downloads filed into the retirement home.
+      if (entry.name.startsWith(".")) continue;
       const key = normalize(entry.name);
       // First one wins, so a library that already contains both spellings stays on whichever
       // the filesystem lists first rather than flip-flopping between runs.

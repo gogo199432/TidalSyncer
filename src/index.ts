@@ -7,6 +7,7 @@ import { logDownloadReport, runDownload, DownloadError } from "./download.ts";
 import { logExportReport, runExport } from "./export.ts";
 import { runFavoritesSync } from "./favorites.ts";
 import { log, setLogLevel } from "./logger.ts";
+import { logRepairReport, runRepair, type RepairOptions } from "./repair.ts";
 import { logFavoritesReport, runFailed, syncOnStartup, SyncRunner } from "./runner.ts";
 import { SettingsService, SettingsStore } from "./settings.ts";
 import { SyncStore } from "./store.ts";
@@ -39,6 +40,10 @@ Commands:
   download   Snapshot the catalogue as 'export' does, then fetch audio for the tracks
              in it into LIBRARY_DIR. A --dry-run plans against the existing snapshot
              instead, contacting nothing
+  repair     Tidy a library filled by an older version: write tags into files that
+             have none, taking them from the export snapshot, and remove album folders
+             an upgrade left holding a cover and lyrics but no audio. Contacts nothing.
+             Start with --dry-run
 
 Options:
   --force       With 'sync' or 'daemon': re-mirror even if ListenBrainz has no new edition
@@ -51,7 +56,11 @@ Options:
                 before the track is skipped — exact | album-agnostic | loose
   --upgrade     With 'download': also replace files TIDAL has a better copy of. The old
                 file moves to DATA_DIR/replaced rather than being deleted
-  --dry-run     With 'download': list what would be fetched, contacting nothing
+  --dry-run     With 'download': list what would be fetched, contacting nothing.
+                With 'repair': report what it would change and change nothing
+  --tags-only   With 'repair': only write missing tags, leave the folders alone
+  --folders-only
+                With 'repair': only remove folders with no audio, write no tags
   --help        Show this message
 
 Mirroring favourites back needs SYNC_FAVORITES=true and a LISTENBRAINZ_TOKEN.
@@ -123,6 +132,13 @@ async function main(): Promise<number> {
         dryRun: args.includes("--dry-run") || config.dryRun,
         skipTier: (option("skip-tier") ?? config.skipTier) as MatchTier,
         upgrade: args.includes("--upgrade") || config.upgrade,
+      });
+    case "repair":
+      return await commandRepair(config, {
+        dryRun: args.includes("--dry-run") || config.dryRun,
+        // Each flag turns the *other* half off, so no flag means both halves run.
+        tags: !args.includes("--folders-only"),
+        orphans: !args.includes("--tags-only"),
       });
     default:
       console.error(`Unknown command "${command}"\n`);
@@ -260,6 +276,30 @@ async function commandDownload(config: Config, options: Parameters<typeof runDow
   const report = await runDownload(config, options);
   logDownloadReport(report);
   return report.failed > 0 ? 1 : 0;
+}
+
+/**
+ * The one-off pass over files earlier versions wrote badly.
+ *
+ * Deliberately not on the schedule and not in the dashboard: it rewrites and deletes files in
+ * a library, which is a thing to do on purpose, once, having first looked at what it says it
+ * will do. It reads the export snapshot already on disk and contacts nothing, so it needs no
+ * credentials and can be run at any time.
+ */
+async function commandRepair(config: Config, options: RepairOptions): Promise<number> {
+  if (!options.tags && !options.orphans) {
+    console.error("--tags-only and --folders-only cannot both be given");
+    return 64; // EX_USAGE
+  }
+
+  const report = await runRepair(config, options);
+  logRepairReport(report);
+
+  if (options.dryRun) {
+    console.log("\nThis was a dry run and nothing was changed. Run again without --dry-run to apply it.");
+  }
+
+  return report.tags.failed > 0 ? 1 : 0;
 }
 
 async function commandDaemon(config: Config, settings: SettingsStore, force: boolean): Promise<number> {

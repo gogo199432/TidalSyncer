@@ -2,10 +2,13 @@ import type { Dirent } from "node:fs";
 import { readdir, rename, rm } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import type { Config } from "../config.ts";
+import { CoverStore } from "../covers.ts";
 import { DirectoryNames } from "../directories.ts";
+import type { Enrichment } from "../enrich.ts";
 import { libraryPathFor, type ExportedTrack, type Tombstone } from "../export.ts";
 import { log } from "../logger.ts";
 import { MusicBrainzClient } from "../musicbrainz.ts";
+import { isUntagged, readTags, tagsFor, writeTags, type TrackTags } from "../tags.ts";
 import { isSucceeded, SlskdClient, SlskdError, type SlskdTransfer } from "./client.ts";
 import { extensionOf, pick, searchText, type WantedTrack } from "./match.ts";
 import { PendingTransfers, type PendingTransfer } from "./pending.ts";
@@ -230,7 +233,7 @@ export async function runFallback(
   return report;
 }
 
-type Resolved = { track: WantedTrack; target: string };
+type Resolved = { track: WantedTrack; target: string; tags: TrackTags; cover?: Enrichment["cover"] };
 
 /**
  * Works out what to search for, and where the result should end up.
@@ -250,6 +253,8 @@ async function resolveNames(config: Config, candidates: FallbackCandidate[]): Pr
         resolved.set(candidate.tidalId, {
           track: { artist, title: track.title, duration: track.duration },
           target: track.path,
+          tags: tagsFor(track),
+          cover: track.enrichment?.cover,
         });
       }
       continue;
@@ -276,6 +281,9 @@ async function resolveNames(config: Config, candidates: FallbackCandidate[]): Pr
       // MusicBrainz knows which release the recording belongs to, so a delisted track lands
       // beside the rest of its album rather than in a heap under "Unknown Album".
       target: libraryPathFor(name.artist, name.album, name.title),
+      // Everything that survived the track being delisted. There is no release date and no
+      // media tag left to have, but a name and an ISRC are what make the file findable again.
+      tags: { title: name.title, artists: [name.artist], album: name.album, isrc },
     });
   }
 
@@ -298,7 +306,7 @@ async function enqueueOne(
   config: Config,
   client: SlskdClient,
   tidalId: string,
-  { track, target }: Resolved,
+  { track, target, tags, cover }: Resolved,
 ): Promise<EnqueueResult> {
   const responses = await client.search(searchText(track));
   const candidate = pick(responses, track, config.slskd.losslessOnly);
@@ -331,6 +339,8 @@ async function enqueueOne(
       remoteFilename: candidate.file.filename,
       destination,
       target,
+      tags,
+      cover,
       queuedAt: new Date().toISOString(),
     },
   };
@@ -424,7 +434,13 @@ function baseName(path: string): string {
  */
 async function fileIntoLibrary(
   config: Config,
-  record: { remoteFilename: string; destination: string; target: string },
+  record: {
+    remoteFilename: string;
+    destination: string;
+    target: string;
+    tags?: TrackTags;
+    cover?: Enrichment["cover"];
+  },
 ): Promise<string | undefined> {
   const root = join(config.slskd.downloadsDir, record.destination);
   const found = await findFile(root, baseName(record.remoteFilename));
@@ -444,8 +460,42 @@ async function fileIntoLibrary(
     await pruneEmpty(dirname(found), root);
   }
 
+  await tagIfBare(config, target, record);
+
   log.info("Filed a Soulseek download into the library", { path: withExtension(record.target, extname(found)) });
   return withExtension(record.target, extname(found));
+}
+
+/**
+ * Writes what is known about the track into a file that says nothing about itself.
+ *
+ * Fill-in, never overwrite. Soulseek is other people's libraries, and most of what comes back
+ * is properly tagged by someone who cared more about this album than this tool ever will —
+ * replacing that with TIDAL's spelling would be vandalism. But some peers share bare rips, and
+ * an untagged file is one a music server files under "[Unknown Artist]" no matter how neatly
+ * this renamed it.
+ *
+ * Never throws: the file is in the library either way, and losing its tags is not a reason to
+ * report a completed transfer as failed.
+ */
+async function tagIfBare(
+  config: Config,
+  path: string,
+  record: { tags?: TrackTags; cover?: Enrichment["cover"] },
+): Promise<void> {
+  const tags = record.tags;
+  if (!tags) return;
+
+  try {
+    const existing = await readTags(path);
+    if (!existing || !isUntagged(existing) || existing.hasArtwork) return;
+
+    const covers = new CoverStore(join(config.dataDir, "covers"));
+    await writeTags(path, tags, await covers.pathForCover(record.cover));
+    log.debug("Tagged a Soulseek download that arrived bare", { path, title: tags.title });
+  } catch (error) {
+    log.warn("Filed a Soulseek download but could not tag it", { path, error: String(error) });
+  }
 }
 
 /** Depth-first search for an exact basename. Returns the first match. */

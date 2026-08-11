@@ -14,6 +14,7 @@
     "export": "bun run src/index.ts export",
     "download-login": "bun run src/index.ts download-login",
     "download": "bun run src/index.ts download",
+    "repair": "bun run src/index.ts repair",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },

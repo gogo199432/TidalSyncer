@@ -436,6 +436,39 @@ not exist yet. Players resolve relative paths against the playlist's own locatio
 dropping these next to a filled-in library makes them work with no rewriting. Tracks TIDAL
 would not resolve become `# unresolved TIDAL track <id>` comments rather than silent gaps.
 
+#### What MusicBrainz adds
+
+TIDAL gives a title, a credit list, an album and a date, and nothing else — no genre, and no
+identifier that means anything outside TIDAL. So every track with an ISRC is looked up, and
+what comes back is stored in the snapshot and written into the file when it is downloaded:
+
+- **Genre**, from MusicBrainz's community tags. Only tags carrying a `genre_mbid` count, which
+  is what separates "trip hop" and "acid jazz" from "melancholic", "nocturnal" and "sunday
+  morning". Taken from the recording first, then the release group, then the artist — the
+  narrowest answer available. One genre is written, since a single `-metadata genre=` is all
+  ffmpeg offers; the rest stay in `export.json`.
+- **MusicBrainz identifiers** — recording, artist, release and release group, under Picard's
+  names. Navidrome links straight out to them, and anything re-reading this library later
+  matches exactly instead of guessing at spellings.
+- **Cover art**, from the Cover Art Archive, embedded at 500px. Fetched once per release and
+  cached in `DATA_DIR/covers`, so an album's twelve tracks cost one image.
+- **A release year**, used only for tracks TIDAL gave no date for at all.
+
+The route is indirect on purpose. MusicBrainz allows one request a second, which for a real
+collection is minutes of waiting, so it is asked only the one question ListenBrainz cannot
+answer — which recording an ISRC is — in batches of twenty. ListenBrainz mirrors the rest,
+needs no token, and answers fifty recordings a request.
+
+Everything is cached in `DATA_DIR/enrichment.json`, misses included, so only tracks new to
+the collection cost anything after the first run — a full first pass over ~1500 tracks is
+about a minute, and the scheduled runs after it are free. None of it is load-bearing: if
+MusicBrainz is unreachable the export is written anyway and the files carry TIDAL's metadata
+alone, exactly as they did before this existed.
+
+Note that `.m4a` files (the AAC fallback tiers) keep the names, date, genre and cover but lose
+the ISRC and the MusicBrainz ids: MP4 has no atom for them, and ffmpeg cannot write the iTunes
+freeform ones taggers use instead. FLAC takes all of it.
+
 ### `download` — the audio
 
 ```bash
@@ -454,6 +487,67 @@ Then fetches `GET /v2/trackManifests/{id}` with `manifestType=HLS`,
 `uriScheme=HTTPS`, `usage=DOWNLOAD`, pulls the plain HLS segments, and demuxes the FLAC out
 of its MP4 container with `ffmpeg -c copy` (so it stays lossless — the bytes are moved, not
 re-encoded).
+
+### Tags
+
+Everything written into the library is tagged as it lands: title, artist, album artist, the
+full credit list, album, release date and ISRC from TIDAL, plus the genre, MusicBrainz
+identifiers and embedded cover art the snapshot resolved from MusicBrainz — all of it taken
+from the same snapshot that named the path.
+
+This is not decoration. A path is not metadata, and every music server worth pointing at a
+library reads tags and nothing else — Navidrome files an untagged track under
+`[Unknown Artist]` / `[Unknown Album]` with the filename as its title, no year and no track
+number, however tidy the folder it sits in is. TIDAL's segments carry no metadata of their
+own, so a file that is not tagged on the way in never gets tagged at all.
+
+The tags go on during the demux for the FLAC tiers, which costs nothing — the pass was
+already happening. The AAC tiers gain a remux they did not need before; without `ffmpeg` on
+`PATH` they are still fetched, untagged, with a warning. Soulseek downloads are only tagged
+when the peer left them bare: most of what comes back is properly tagged by somebody who
+cared more about that album than this tool ever will, and overwriting that would be
+vandalism.
+
+Track numbers are not written. TIDAL reports them on the *album*'s track list rather than on
+the track, so having one per track would mean an extra request per album for a field this
+library layout — one folder per release — mostly does not need.
+
+Files downloaded before this existed are untagged for ever, since `download` skips whatever
+is already on disk. `bun run repair` is the one-off pass that fixes them.
+
+### `repair` — for a library filled by an older version
+
+```bash
+bun run repair --dry-run    # always start here
+bun run repair
+```
+
+Contacts nothing. Two independent halves, both of which can be run alone
+(`--tags-only`, `--folders-only`):
+
+**Missing tags.** Every audio file in `LIBRARY_DIR` is read, and any file carrying *neither*
+a title nor an artist is looked up in the export snapshot by where it sits — artist and title
+must agree, the album need not. What the snapshot knows is then written in with
+`ffmpeg -c copy`, which moves the frames untouched — including the genre, MusicBrainz ids and
+cover art, so a backfilled file ends up saying exactly what a freshly downloaded one does.
+Take a fresh snapshot first (`bun run export`) if yours predates the MusicBrainz lookups,
+or the backfill will only have TIDAL's half to write.
+
+It refuses more than it does. A file that already says anything about itself is left alone,
+so nothing can overwrite tags another tool wrote. A file `ffprobe` cannot describe is
+reported, not rewritten. A file carrying embedded cover art is skipped, because the retag
+would drop it. Anything the snapshot cannot name is counted and left as it is.
+
+**Folders with no audio.** An upgrade retires the file it replaces and writes the replacement
+at the path the *snapshot* names — TIDAL's release rather than the one your folder was named
+after — so `Tennessee Ernie Ford - Sixteen Tons/` can be left holding `cover.jpg` and an
+`.lrc` and no music. Those folders go, along with empty ones.
+
+Conservative by construction: a directory is removed only when every file beneath it is a
+known sidecar (art, lyrics, playlists, ripper logs) and every subdirectory beneath it is going
+too. One file it cannot account for keeps the whole tree, as does a `.ndignore` — somebody
+having already said what they want that folder to be. `TIDAL_REPLACED_DIR` is never touched,
+nor is any hidden directory, and the library root always stays.
 
 ### Skipping what you already have
 
@@ -775,6 +869,7 @@ finishes — so the first one is at most one `SYNC_SCHEDULE` away.
 | `bun run export` | Snapshot your curation to `DATA_DIR/export` (JSON + `.m3u8`) |
 | `bun run download-login` | Authorise the playback session `download` needs (separate from `login`) |
 | `bun run download` | Snapshot the catalogue, then fetch audio from it into `LIBRARY_DIR` |
+| `bun run repair` | One-off: tag library files that have none, and remove folders left with no audio (`--dry-run`, `--tags-only`, `--folders-only`) |
 | `bun test` | Run tests |
 | `bun run typecheck` | `tsc --noEmit` |
 
@@ -798,12 +893,16 @@ finishes — so the first one is at most one `SYNC_SCHEDULE` away.
 
 ```
 src/
-  index.ts          CLI: login / sync / favorites / status / daemon / export / download
+  index.ts          CLI: login / sync / favorites / status / daemon / export / download / repair
   config.ts         env parsing and validation, with the saved overlay on top
   settings.ts       what is settable, DATA_DIR/settings.json, and applying it live
   export.ts         curation snapshot: export.json + .m3u8 per playlist
   download.ts       fills LIBRARY_DIR from the snapshot, resumable
   library.ts        index of what is already on disk, so download skips it
+  tags.ts           what a file says about itself: reading, writing, and what counts as none
+  enrich.ts         genre, MusicBrainz ids and cover art for anything with an ISRC, cached
+  covers.ts         Cover Art Archive images, fetched once per release and kept
+  repair.ts         one-off pass over a library filled before downloads were tagged
   listenbrainz.ts   createdfor listing, JSPF parsing, ISRC resolution, feedback writes
   musicbrainz.ts    batched ISRC -> recording MBID lookup, rate limited
   sync.ts           ListenBrainz -> TIDAL: edition selection, mirroring, state

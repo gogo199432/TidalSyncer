@@ -1,6 +1,8 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { Enrichment } from "../enrich.ts";
 import { log } from "../logger.ts";
+import type { TrackTags } from "../tags.ts";
 
 /**
  * Transfers slskd is still working on when a run ends.
@@ -24,6 +26,17 @@ export type PendingTransfer = {
   destination: string;
   /** Library-relative path it should end up at, extension still to be decided. */
   target: string;
+  /**
+   * What to write into the file if it arrives with no tags of its own.
+   *
+   * Kept here rather than recomputed when the transfer lands, because it usually lands in a
+   * *later run* — hours after the snapshot that knew what the track was, and for a delisted
+   * one after a MusicBrainz lookup that this tool is in no hurry to repeat. Optional: a
+   * ledger written by an older version has none.
+   */
+  tags?: TrackTags;
+  /** Which Cover Art Archive image to embed, for the same reason and with the same caveat. */
+  cover?: Enrichment["cover"];
   queuedAt: string;
 };
 

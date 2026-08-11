@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { LibraryIndex } from "./library.ts";
+import { describePath, LibraryIndex } from "./library.ts";
 import { sanitize } from "./export.ts";
 
 let root: string;
@@ -124,6 +124,83 @@ describe("LibraryIndex", () => {
     const empty = await LibraryIndex.build(join(root, "does-not-exist"));
     expect(empty.fileCount).toBe(0);
     expect(empty.find({ artists: ["Radiohead"], album: "OK Computer", title: "Karma Police" })).toBeUndefined();
+  });
+});
+
+/**
+ * A retired file is not in the library any more, whatever the filesystem says.
+ *
+ * Indexing one is how a `replacedDir` inside `libraryDir` ends up retiring its own retirees
+ * into `.replaced/.replaced/.replaced`, and how a track gets reported as already present when
+ * its only copy is the superseded one waiting to be pruned.
+ */
+describe("what the walk refuses to look at", () => {
+  let excluded: string;
+  let index: LibraryIndex;
+
+  beforeAll(async () => {
+    excluded = await mkdtemp(join(tmpdir(), "library-excluded-"));
+    for (const relative of [
+      "Massive Attack/Mezzanine/Angel.flac",
+      // Retired by an upgrade, into a directory the user pointed inside the library.
+      "retired/Massive Attack/Mezzanine/Teardrop.m4a",
+      // A dotfolder: this tool's own transients, a scanner's bookkeeping, a trash can.
+      ".replaced/Portishead/Dummy/Glory Box.m4a",
+    ]) {
+      const path = join(excluded, relative);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, "");
+    }
+
+    index = await LibraryIndex.build(excluded, { exclude: [join(excluded, "retired")] });
+  });
+
+  afterAll(async () => {
+    await rm(excluded, { recursive: true, force: true });
+  });
+
+  test("indexes the library proper", () => {
+    expect(index.fileCount).toBe(1);
+    expect(index.find({ artists: ["Massive Attack"], album: "Mezzanine", title: "Angel" })?.tier).toBe("exact");
+  });
+
+  test("does not index an excluded directory", () => {
+    expect(index.find({ artists: ["Massive Attack"], album: "Mezzanine", title: "Teardrop" })).toBeUndefined();
+  });
+
+  test("does not index a hidden directory", () => {
+    expect(index.find({ artists: ["Portishead"], album: "Dummy", title: "Glory Box" })).toBeUndefined();
+  });
+});
+
+describe("describePath", () => {
+  test("reads artist, album and title back out of a path", () => {
+    expect(describePath("/library/Portishead/Dummy/Glory Box.flac")).toEqual({
+      artist: "Portishead",
+      album: "Dummy",
+      titles: ["Glory Box"],
+    });
+  });
+
+  test("offers the title with and without a leading track number", () => {
+    expect(describePath("/library/Pendulum/Hold Your Colour/02 - Slam.flac").titles).toEqual(["02 - Slam", "Slam"]);
+  });
+
+  test("keeps the literal name for a title that genuinely starts with a number", () => {
+    // Both candidates, never the stripped one instead of the literal: nothing can tell
+    // "99 Problems" from a numbered track, so the ambiguous strip is only ever *added*.
+    expect(describePath("/library/Jay-Z/The Black Album/99 Problems.flac").titles).toEqual([
+      "99 Problems",
+      "Problems",
+    ]);
+  });
+
+  test("looks past a disc folder for the album", () => {
+    expect(describePath("/library/Parliament/Tear The Roof Off/Disc 2/02 - Give Up The Funk.m4a")).toEqual({
+      artist: "Parliament",
+      album: "Tear The Roof Off",
+      titles: ["02 - Give Up The Funk", "Give Up The Funk"],
+    });
   });
 });
 

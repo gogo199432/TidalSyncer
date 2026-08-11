@@ -64,6 +64,43 @@ type LookupResponse = Array<{
   artist_credit_name?: string;
 }>;
 
+/**
+ * One community tag on a recording, its release group or its artist.
+ *
+ * `genre_mbid` is the whole distinction between a genre and a mood: "trip hop" and "acid jazz"
+ * carry one, "melancholic", "atmospheric" and "nocturnal" do not. Tags without one are still
+ * returned here — filtering is the caller's business, not the client's.
+ */
+export type LbTag = {
+  tag: string;
+  count?: number;
+  genre_mbid?: string;
+};
+
+/** The `/1/metadata/recording/` response for one recording, with `inc=artist release tag`. */
+export type RecordingMetadata = {
+  artist?: {
+    name?: string;
+    artists?: Array<{ artist_mbid?: string; name?: string }>;
+  };
+  recording?: { name?: string; length?: number; isrcs?: string[] | null };
+  release?: {
+    mbid?: string;
+    name?: string;
+    year?: number;
+    album_artist_name?: string;
+    release_group_mbid?: string;
+    /** Cover Art Archive image id, and the release it hangs off. Both or neither. */
+    caa_id?: number;
+    caa_release_mbid?: string;
+  };
+  tag?: {
+    recording?: LbTag[];
+    release_group?: LbTag[];
+    artist?: LbTag[];
+  };
+};
+
 /** ListenBrainz caps the metadata endpoint at 50 MBIDs per request. */
 const METADATA_BATCH_SIZE = 50;
 
@@ -198,6 +235,43 @@ export class ListenBrainzClient {
     }
 
     return isrcs;
+  }
+
+  /**
+   * Everything ListenBrainz knows about a set of recordings: credits, the release they came
+   * from, and the community tags — which is where genre comes from.
+   *
+   * The same endpoint `fetchIsrcs` uses, asked a wider question. It mirrors MusicBrainz and
+   * takes 50 MBIDs a request with no token and no 1-req/s gate, so a whole collection's worth
+   * of metadata costs a couple of dozen requests rather than one per track against MusicBrainz
+   * itself.
+   *
+   * A batch that fails is logged and skipped rather than thrown: this is enrichment, and a
+   * track with no genre is worth incomparably more than an export that did not happen.
+   */
+  async fetchRecordingMetadata(recordingMbids: string[]): Promise<Map<string, RecordingMetadata>> {
+    const metadata = new Map<string, RecordingMetadata>();
+    const unique = [...new Set(recordingMbids.filter(Boolean))];
+
+    for (const chunk of chunked(unique, METADATA_BATCH_SIZE)) {
+      const url = new URL("/1/metadata/recording/", this.baseUrl);
+      url.searchParams.set("recording_mbids", chunk.join(","));
+      url.searchParams.set("inc", "artist release tag");
+
+      try {
+        const body = await this.get<Record<string, RecordingMetadata>>(url);
+        for (const [mbid, entry] of Object.entries(body ?? {})) {
+          if (entry) metadata.set(mbid, entry);
+        }
+      } catch (error) {
+        log.warn("Could not read recording metadata for a batch", {
+          recordings: chunk.length,
+          error: String(error),
+        });
+      }
+    }
+
+    return metadata;
   }
 
   /**

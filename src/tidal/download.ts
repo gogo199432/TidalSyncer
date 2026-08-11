@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { log } from "../logger.ts";
+import { artworkArgs, artworkInputs, FfmpegError, metadataArgs, runFfmpeg, type TrackTags } from "../tags.ts";
 import type { DeviceSession } from "./device-auth.ts";
 
 const MANIFEST_URL = "https://openapi.tidal.com/v2/trackManifests";
@@ -78,6 +78,11 @@ type ParsedPlaylist = {
  * rather than an error, and silently writing a 30-second file would be much worse than
  * taking the tier that is actually available.
  *
+ * `write.tags` and `write.artwork` go into whatever lands. TIDAL's segments carry no metadata
+ * and no cover of their own, so without them the file is one a music server can only file
+ * under "[Unknown Artist]" — see `src/tags.ts`. Both are optional, so a caller that has
+ * neither (a bare track id at a terminal) still gets audio rather than an error.
+ *
  * Returns the path written, or undefined if every tier came back as a preview.
  */
 export async function downloadTrack(
@@ -85,7 +90,9 @@ export async function downloadTrack(
   trackId: string,
   destination: string,
   quality: Quality = "lossless",
+  write: { tags?: TrackTags; artwork?: string } = {},
 ): Promise<string | undefined> {
+  const { tags, artwork } = write;
   const chain = QUALITIES.slice(QUALITIES.indexOf(quality)).filter(Boolean);
   let lastPreviewReason: string | undefined;
 
@@ -131,10 +138,24 @@ export async function downloadTrack(
         // The library is usually a share something else is scanning — Navidrome, Plex — and
         // a rename is atomic where a half-written .flac appearing under its final name is a
         // corrupt track in someone's index.
-        await demuxFlac(raw, demuxed);
+        await demuxFlac(raw, demuxed, tags, artwork);
+        await rename(demuxed, target);
+        await rm(raw, { force: true });
+      } else if (tags && Bun.which("ffmpeg")) {
+        // The AAC tiers need no demux, but they do need the tags, and the only way to get
+        // them in is a remux. Same copy-not-encode as the FLAC branch, and the same rename.
+        await remux(raw, demuxed, "mp4", tags, artwork);
         await rename(demuxed, target);
         await rm(raw, { force: true });
       } else {
+        // Untagged, but on disk. ffmpeg is only a hard requirement for the FLAC tiers — see
+        // `backup.ts` — so an install without it must still be able to fetch AAC.
+        if (tags) {
+          log.warn("Wrote an untagged file: ffmpeg is not on PATH, so its tags could not be set", {
+            trackId,
+            path: target,
+          });
+        }
         await rename(raw, target);
       }
     } catch (error) {
@@ -270,35 +291,55 @@ async function writeSegments(playlist: ParsedPlaylist, path: string): Promise<nu
  * Lifts the FLAC stream out of the MP4 container without re-encoding.
  *
  * `-c copy` is what keeps this lossless: the bytes are moved, not decoded and re-compressed.
- *
- * `-f flac` is not optional. ffmpeg picks the output format from the filename's extension,
- * and `output` is a temporary `.part` — deliberately not `.flac`, so a scanner watching the
- * library cannot pick it up mid-write. Without the explicit format that is an immediate
- * "Unable to choose an output format" and every single track fails.
  */
-export async function demuxFlac(input: string, output: string): Promise<void> {
-  const ffmpeg = Bun.which("ffmpeg");
-  if (!ffmpeg) throw new DownloadError("ffmpeg is required to demux FLAC from the MP4 container, but is not on PATH.");
+export async function demuxFlac(
+  input: string,
+  output: string,
+  tags?: TrackTags,
+  artwork?: string,
+): Promise<void> {
+  if (!Bun.which("ffmpeg")) {
+    throw new DownloadError("ffmpeg is required to demux FLAC from the MP4 container, but is not on PATH.");
+  }
+  await remux(input, output, "flac", tags, artwork);
+}
 
-  const code = await new Promise<number>((resolve, reject) => {
-    const child = spawn(
-      ffmpeg,
-      ["-y", "-hide_banner", "-loglevel", "error", "-i", input, "-map", "0:a:0", "-c", "copy", "-f", "flac", output],
-      { stdio: ["ignore", "ignore", "pipe"] },
-    );
-
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    child.on("error", reject);
-    child.on("close", (status) => {
-      if (status !== 0) reject(new DownloadError(`ffmpeg failed (${status}): ${stderr.trim().slice(0, 300)}`));
-      else resolve(status);
-    });
-  });
-
-  if (code !== 0) throw new DownloadError(`ffmpeg exited with ${code}`);
+/**
+ * One stream, one container, no re-encode — plus whatever is known about the track.
+ *
+ * `format` is not optional. ffmpeg picks the output format from the filename's extension, and
+ * `output` is always a temporary with a deliberately non-audio suffix so a scanner watching
+ * the library cannot pick it up mid-write. Without the explicit format that is an immediate
+ * "Unable to choose an output format" and every single track fails.
+ *
+ * `-map_metadata -1` drops what the source carried before the tags go on. For a TIDAL segment
+ * stream that is `major_brand`, `compatible_brands` and an encoder string — container
+ * bookkeeping that means nothing to a music server and that `isUntagged` would otherwise have
+ * to keep making excuses for.
+ */
+async function remux(
+  input: string,
+  output: string,
+  format: string,
+  tags?: TrackTags,
+  artwork?: string,
+): Promise<void> {
+  try {
+    await runFfmpeg([
+      "-i", input,
+      ...artworkInputs(artwork),
+      "-map", "0:a:0",
+      "-map_metadata", "-1",
+      ...(tags ? metadataArgs(tags) : []),
+      ...artworkArgs(artwork),
+      "-c", "copy",
+      "-f", format,
+      output,
+    ]);
+  } catch (error) {
+    // The caller's vocabulary is DownloadError; ffmpeg's failure is one way a track fails.
+    throw error instanceof FfmpegError ? new DownloadError(error.message) : error;
+  }
 }
 
 /**

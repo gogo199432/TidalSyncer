@@ -2,6 +2,7 @@ import type { Dirent } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, rmdir, stat, utimes } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import type { Config } from "./config.ts";
+import { CoverStore } from "./covers.ts";
 import type { ExportManifest, ExportedTrack } from "./export.ts";
 import { DirectoryNames } from "./directories.ts";
 import { LibraryIndex, type MatchTier } from "./library.ts";
@@ -14,6 +15,7 @@ import {
   type LocalQuality,
   type QualityTier,
 } from "./quality.ts";
+import { tagsFor, TAG_SUFFIX } from "./tags.ts";
 import { DeviceNotAuthenticatedError, DeviceSession } from "./tidal/device-auth.ts";
 import {
   downloadTrack,
@@ -151,7 +153,7 @@ const UPGRADE_PREFIX = ".upgrading-";
 
 /** Matches every transient this tool writes into the library, and nothing else. */
 const INTERRUPTED = new RegExp(
-  `^${UPGRADE_PREFIX.replace(".", "\\.")}(\\d+)-|\\.(\\d+)(?:${RAW_SUFFIX}|${PART_SUFFIX})$`,
+  `^${UPGRADE_PREFIX.replace(".", "\\.")}(\\d+)-|\\.(\\d+)(?:${RAW_SUFFIX}|${PART_SUFFIX}|${TAG_SUFFIX})$`,
 );
 
 /**
@@ -206,7 +208,13 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
 
   // Built once up front rather than stat'ing per track: the whole point is to match files
   // this tool did not write, whose names will not be the ones it would have chosen.
-  const library = await LibraryIndex.build(config.libraryDir);
+  //
+  // `replacedDir` is excluded because a retired file is not in the library any more, whatever
+  // the filesystem says. Indexing it is how a `replacedDir` inside `libraryDir` — which the
+  // config permits, with a warning — ends up retiring its own retirees into
+  // `.replaced/.replaced/.replaced`, and how a track can be reported as already present when
+  // its only copy is the superseded one waiting to be pruned.
+  const library = await LibraryIndex.build(config.libraryDir, { exclude: [config.replacedDir] });
   const allowedTiers = new Set(TIER_ORDER.slice(0, TIER_ORDER.indexOf(options.skipTier) + 1));
   // Read on dry runs too, so the plan matches what a real run would actually do rather than
   // re-proposing upgrades an earlier run already established TIDAL will not serve.
@@ -214,6 +222,10 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
   // library with `Nero` does not acquire a second `NERO` next to it.
   const directories = new DirectoryNames(config.libraryDir);
   const ledger = options.upgrade ? await UpgradeLedger.open(config.dataDir) : undefined;
+  // One image per release, fetched the first time a track from it is written and kept for
+  // every later run. Empty-handed for anything the snapshot could not enrich, which costs
+  // nothing: `pathFor` returns undefined and the file is written without a cover.
+  const covers = new CoverStore(join(config.dataDir, "covers"));
   let consecutiveFailures = 0;
 
   // Everything TIDAL turns out not to serve, collected as the run goes and handed to
@@ -319,7 +331,7 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
       const destination = join(config.libraryDir, await directories.resolve(track.path));
 
       if (upgrade) {
-        const result = await replace(config, session!, track, destination, upgrade, options.quality);
+        const result = await replace(config, session!, track, destination, upgrade, options.quality, covers);
 
         // Remember what TIDAL actually served. `unavailable` says nothing about quality, so
         // it is not recorded — a track that becomes entitled later deserves another look.
@@ -365,7 +377,10 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
           );
         }
       } else {
-        const written = await downloadTrack(session!, track.tidalId, destination, options.quality);
+        const written = await downloadTrack(session!, track.tidalId, destination, options.quality, {
+          tags: tagsFor(track),
+          artwork: await covers.pathFor(track.enrichment),
+        });
 
         if (!written) {
           report.unavailable += 1;
@@ -572,13 +587,17 @@ async function replace(
   destination: string,
   upgrade: Upgrade,
   quality: Quality,
+  covers: CoverStore,
 ): Promise<ReplaceResult> {
   // Leading dot, so a scanner watching the library ignores whatever a crash leaves behind.
   // `downloadTrack` picks the extension itself — it walks down tiers — so the real target is
   // only known once something has actually been written.
   const scratch = join(dirname(destination), `${UPGRADE_PREFIX}${process.pid}-${basename(destination)}`);
 
-  const written = await downloadTrack(session, track.tidalId, scratch, quality);
+  const written = await downloadTrack(session, track.tidalId, scratch, quality, {
+    tags: tagsFor(track),
+    artwork: await covers.pathFor(track.enrichment),
+  });
   if (!written) return { outcome: "unavailable" };
 
   // An unreadable replacement is treated exactly like a worse one. `considerUpgrade` refuses
@@ -793,7 +812,8 @@ async function pruneRetired(config: Config): Promise<void> {
   }
 }
 
-async function readManifest(config: Config): Promise<ExportManifest> {
+/** Exported for `repair`, which reads the same snapshot to answer what a file should say. */
+export async function readManifest(config: Config): Promise<ExportManifest> {
   const path = join(config.dataDir, "export", "export.json");
 
   try {
