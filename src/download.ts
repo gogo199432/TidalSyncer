@@ -365,6 +365,9 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
         } else {
           report.upgraded += 1;
           report.upgradedFrom[upgrade.from.tier] += 1;
+          // An upgrade can land under a different name than the file it replaced — TIDAL's
+          // release rather than the old folder's — so the new path has to be indexed too.
+          library.add(result.path);
           log.info("Replaced with a better copy", {
             track: label(track),
             from: describeQuality(upgrade.from),
@@ -388,6 +391,7 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
           fallback.push({ tidalId: track.tidalId, index: index + 1, track });
         } else {
           report.downloaded += 1;
+          library.add(written);
           emit("downloaded", undefined, relative(config.libraryDir, written));
 
           // A fresh download settles this account's entitlement for this track just as well
@@ -456,7 +460,10 @@ export async function runDownload(config: Config, options: DownloadOptions): Pro
 
         // A fetched track counts as downloaded because that is what it is — it is in the
         // library now — and `soulseek` on the event says where it came from.
-        if (outcome.status === "downloaded") report.downloaded += 1;
+        if (outcome.status === "downloaded") {
+          report.downloaded += 1;
+          if (outcome.path) library.add(join(config.libraryDir, outcome.path));
+        }
         if (outcome.status === "present") report.skipped += 1;
 
         options.onEvent?.({

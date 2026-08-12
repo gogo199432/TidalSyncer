@@ -72,6 +72,19 @@ const DISC_DIRECTORY = /^(cd|disc|disk|vol|volume)[\s._-]*\d{1,2}$/i;
  */
 const TRACK_NUMBER = /^\d{1,3}(?:\s*[.\-_]\s*|\s+)/;
 
+/**
+ * How many leading numbers may be stripped from a filename.
+ *
+ * Two, because "01-05 - The Bidding" is a disc number *and* a track number — the shape
+ * Picard writes by default. Stripping once leaves "05 - The Bidding", which matches
+ * nothing, so a file named that way is invisible to the index and gets downloaded a second
+ * time beside itself.
+ *
+ * Not unbounded: "1-800-273-8255" would otherwise register as "8255". Two is what the
+ * disc-track form needs and nothing beyond it.
+ */
+const MAX_TRACK_NUMBERS = 2;
+
 /** "F.O.O.L - Destroyer of Speakers". Spaces around the dash, so hyphenated words survive. */
 const CREDITED = /^(.+?)\s+-\s+(.+)$/;
 
@@ -196,6 +209,18 @@ export class LibraryIndex {
     return undefined;
   }
 
+  /**
+   * Registers a file that has just landed, so the rest of the run can see it.
+   *
+   * The index is a snapshot of the library as the run found it, and a run downloads into
+   * that library as it goes. Without this, a track reachable twice in one export — as a
+   * single and again on a compilation, or from two playlists — is missing both times it is
+   * looked at, and lands twice under two album folders.
+   */
+  add(path: string): void {
+    this.register(path);
+  }
+
   /** Library-relative path, for logging something shorter than the absolute one. */
   relative(path: string): string {
     return relative(this.root, path);
@@ -224,8 +249,17 @@ export function describePath(path: string): { artist: string; album: string; tit
     artist = basename(dirname(dirname(dirname(path))));
   }
 
-  const stripped = stem.replace(TRACK_NUMBER, "").trim();
-  return { artist, album, titles: stripped && stripped !== stem ? [stem, stripped] : [stem] };
+  // Every intermediate is kept, not just the fully stripped form: "01-05 - The Bidding" is
+  // also plausibly a track called "05 - The Bidding", and the looser reading must not cost
+  // the tighter one a match.
+  const titles = [stem];
+  for (let i = 0; i < MAX_TRACK_NUMBERS; i += 1) {
+    const stripped = titles[titles.length - 1]!.replace(TRACK_NUMBER, "").trim();
+    if (!stripped || stripped === titles[titles.length - 1]) break;
+    titles.push(stripped);
+  }
+
+  return { artist, album, titles };
 }
 
 /** Same artist, album and title, folded. Exported so the backfill can key a snapshot by it. */

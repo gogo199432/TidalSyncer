@@ -27,6 +27,8 @@ const EXISTING = [
   "Kygo/Cloud Nine/01. Stole the Show.flac",
   // A title that genuinely starts with a number must survive intact.
   "Jay-Z/The Black Album/99 Problems.flac",
+  // A disc number and a track number both on the front — Picard's default naming.
+  "Tally Hall/Marvin's Marvelous Mechanical Museum/01-05 - The Bidding.flac",
   // Multi-disc sets put a disc folder between the album and the track.
   "Parliament/Tear The Roof Off/Disc 2/02 - Give Up The Funk.m4a",
   // A flat release folder, with the artist in the filename rather than the directory.
@@ -51,6 +53,26 @@ afterAll(async () => {
 describe("LibraryIndex", () => {
   test("indexes audio files and ignores everything else", () => {
     expect(index.fileCount).toBe(EXISTING.length - 1);
+  });
+
+  test("finds a file named with both a disc and a track number", () => {
+    const hit = index.find({
+      artists: ["Tally Hall"],
+      album: "Marvin's Marvelous Mechanical Museum",
+      title: "The Bidding",
+    });
+
+    expect(hit?.tier).toBe("exact");
+  });
+
+  test("a file that lands mid-run is found by the rest of the run", () => {
+    const wanted = { artists: ["Aphex Twin"], album: "Selected Ambient Works", title: "Xtal" };
+    expect(index.find(wanted)).toBeUndefined();
+
+    // Nothing is written: the index is told what landed, it does not go and look.
+    index.add(join(root, "Aphex Twin/Selected Ambient Works/Xtal.flac"));
+
+    expect(index.find(wanted)?.tier).toBe("exact");
   });
 
   test("matches on artist, album and title", () => {
@@ -192,6 +214,26 @@ describe("describePath", () => {
     expect(describePath("/library/Jay-Z/The Black Album/99 Problems.flac").titles).toEqual([
       "99 Problems",
       "Problems",
+    ]);
+  });
+
+  test("strips a disc number and a track number, and everything in between", () => {
+    // Picard's default naming. Stripping only once leaves "05 - The Bidding", which matches
+    // nothing — a file named this way is invisible to the index and gets downloaded a
+    // second time beside itself.
+    expect(describePath("/library/Tally Hall/Marvin's/01-05 - The Bidding.flac").titles).toEqual([
+      "01-05 - The Bidding",
+      "05 - The Bidding",
+      "The Bidding",
+    ]);
+  });
+
+  test("stops stripping numbers before it eats a title made of them", () => {
+    // Two is what the disc-track form needs; unbounded would register this as "8255".
+    expect(describePath("/library/Logic/Everybody/1-800-273-8255.flac").titles).toEqual([
+      "1-800-273-8255",
+      "800-273-8255",
+      "273-8255",
     ]);
   });
 
